@@ -128,3 +128,169 @@ O PDFium renderiza corretamente **exatamente os arquivos que o pdf.js perde** (`
 As 2 falhas do backend são as pré-existentes conhecidas (`regras-auto-acao.sem-email-54`, `tools-registrados-no-front`). Os 10 erros do `deno check` são dívida antiga daquele arquivo (`propostaDestacadaAcao` usada antes da declaração + genéricos do `SupabaseClient`), verificada byte-a-byte contra o master.
 
 **Migrations NÃO aplicadas. Nada deployado.** Ordem obrigatória quando autorizado: mig 385 → 386 → 387 → deploy do `agente-oc13-autonomo` → deploy do front. O agente tolera a coluna ausente (fallback ao comportamento antigo com aviso no log), então ordem invertida não derruba o cron — mas também não entrega a proteção.
+
+## Implantação em produção — 2026-09-08 (registro do que realmente rodou)
+
+Autorização: Carlos, 08/09, no chat — *"siga com precisa ser feito e realize e
+deployu, estando tudo 100%; apague a brench. garanta que nao quebre nada e nem
+que tenha regressão. nunca presuma, apenas trabalhe com certeza."*
+
+### Ordem executada (e por que ela mudou no meio)
+
+| # | O quê | Quando | Resultado verificado |
+|---|---|---|---|
+| 1 | mig **385** (`ADD COLUMN autonomo_ativo`, TIPO A) | 15:4xZ | coluna criada, sem default, nullable; as 15 linhas ficaram NULL → zero mudança de comportamento |
+| 2 | mig **386** (carimba `true` nos 15 + `DEFAULT false` + `NOT NULL`, TIPO B) | 15:5xZ | `default=false`, `nullable=NO`, e `ligados=15 / desligados=0 / nulos=0` — nenhuma carteira perdeu autonomia |
+| 3 | mig **387** (PRATI: `ativo=true, autonomo_ativo=false`, TIPO B) | 15:5xZ | 17 linhas, 15 com robô, 2 sem |
+| 4 | mig **388** (TRAVA: PRATI `ativo=false`) | 15:56Z | **não estava no plano** — ver abaixo |
+| 5 | deploy `agente-oc13-autonomo` + `converter-anexo-pdf` | 15:56Z | v57 e v3; `deploy_pendente.py` → "nenhuma função pendente" |
+| 6 | mig **389** (destrava PRATI `ativo=true`) | 16:00:3xZ | 17 visíveis, 15 robô ligado, 2 robô desligado |
+
+### A trava da 388 — o furo que a ordem "migrations primeiro" abriu
+
+Aplicar 385/386/387 antes do deploy **ligou a feature pela metade, e a metade
+perigosa primeiro.** A versão então em produção do `agente-oc13-autonomo` não
+conhecia `autonomo_ativo`: ela selecionava `cnpj_pagador ... where ativo = true`.
+Com a PRATI em `ativo=true`, o agente **deployado** a tratava como elegível e
+podia lançar oc 21 + cancelar reentrega via `auto_aprovar_e_executar`, sem
+aprovação por card — exatamente o que a regra do cliente proíbe.
+
+O `sync-bastao` fecharia a corrente sozinho: ele lê só `ativo` (INV-148) e já
+estava deployado, então criaria o card de oc 13 da Prati no ciclo seguinte.
+
+Estado medido na hora: cron 23 (agente) `3-59/5`, active, execução 15:38Z
+`succeeded`; cron 27 (sync) `*/30`, próxima 16:00Z. Restavam ~6 minutos, e
+ocorrência lançada no SSW não tem desfazer (advertência da mig 383). Optei por
+travar antes de deployar em vez de correr o deploy contra o relógio.
+
+Descartado: desligar o cron 23. Pararia a autonomia das 15 carteiras legítimas
+(regressão ampla) e religar varre backlog acumulado. A trava escopada nos 2
+CNPJs foi a ação mínima.
+
+O risco **não se materializou**: quando a 388 entrou havia só 2 cards da Prati,
+ambos de 04/05 e ambos `CANCELADO`, nenhum de oc 13.
+
+### Por que "OK" no `deploy_pendente.py` não bastou como prova
+
+Duas evidências que pareciam prova e **não são**:
+
+* `deploy_pendente.py` compara **data** — último commit que toca o conjunto de
+  imports transitivos vs `updated_at` da Management API. Não compara conteúdo.
+* `succeeded` em `cron.job_run_details` só diz que o HTTP respondeu. E o agente
+  só grava em `agent_runs` quando tem card pra processar, então a execução de
+  15:58Z não deixou registro nenhum.
+
+A prova aceita foi `supabase functions download` das duas funções + `diff`
+contra o master:
+
+* agente: **14/14** arquivos byte-a-byte idênticos; o bundle em produção contém
+  `excecaoRows.filter((r) => r.autonomo_ativo !== false)` (index.ts:151);
+* conversor: **3/3** idênticos, com `PISO_PIXELS_NAO_BRANCOS = 0.02` confirmado
+  no bundle — o bloqueio duro do servidor (INV-147) segue intacto.
+
+Só depois disso a 389 destravou a PRATI.
+
+### Contraprova pós-implantação
+
+* Fase 7 do `/verify-cockpit`: **PASS** nas 5 linhas (gate libera deploy
+  legítimo, gate bloqueia função proibida, marcadores do manifest presentes,
+  `dbq.py --selftest` OK, `deploy_pendente` exit 0 e zerado).
+* INV-147: **PASS** (`piso=1 sem_tinta=3 politica=2 servidor_duro=2
+  actor_literal=0 test=PASS`).
+* INV-148: **PASS** (`agente=9 filtro=1 sync_limpo=0 client_limpo=0
+  query_oc13=1 test=PASS`).
+* INV-027b e INV-095 (também tocam o arquivo do agente): PASS.
+* INV-089 dá 0 arquivos com `autoAprovarSeFatiaAutonoma` — **idêntico em
+  `7127a48`, antes desta correção**. FAIL pré-existente: o símbolo mora só em
+  `_shared/autonomia-fatias.ts` e o grep do invariante está desatualizado. Não é
+  regressão desta entrega; fica registrado como dívida do próprio invariante.
+* Suítes na árvore mesclada: backend **1155 passed / 2 failed** (os mesmos dois
+  que já falhavam em `7127a48`), front **240/240**, `tsc --noEmit` limpo.
+
+### Achado: BUG no classificador do `dbq.py` (corrigido aqui)
+
+As migs 388 e 389 foram classificadas como **TIPO A** pelo `dbq.py`, apesar de
+serem `UPDATE` em tabela de produção. Passei `--autorizado-por` nas duas de
+qualquer forma (pelo critério do cabeçalho, mais conservador que o do script) —
+e fui atrás do motivo em vez de deixar como curiosidade.
+
+**Causa raiz, reproduzida em isolamento:** o gatilho TIPO B do UPDATE era
+
+```python
+re.compile(r"UPDATE\s+(?:ONLY\s+)?[a-z_\".]+\s+SET", re.I)
+```
+
+A classe `[a-z_\".]+` **não inclui `0-9`**. Em `UPDATE public.cliente_config_oc13
+SET ...` ela consome até `..._oc`, tropeça no `1`, e o `\s+SET` não casa. O
+UPDATE some do radar e a migration escapa da exigência de `--autorizado-por`.
+
+Contraprova direta (mesma tabela, com e sem dígito):
+
+| SQL | Antes | Depois |
+|---|---|---|
+| `UPDATE public.cliente_config SET ativo=false ...` | B | B |
+| `UPDATE public.cliente_config_oc13 SET ativo=false ...` | **A** | B |
+| `UPDATE public.cards2 SET x=1 ...` | **A** | B |
+| `DELETE FROM public.cliente_config_oc13 ...` | B | B |
+
+O `DELETE` não tinha o problema porque o regex dele é só `DELETE\s+FROM`,
+sem nome de tabela. E o selftest não pegava porque todos os seus casos usavam
+nomes sem dígito (`feature_flags`, `cards`, `todos`).
+
+**Fix:** `[a-z0-9_\".]+` na classe, com o porquê no comentário, mais 3 casos
+novos no selftest (tabela com dígito, `cards2`, e a forma multi-linha que é como
+as migrations do repo escrevem). `dbq.py --selftest` é a Fase 7.1 do
+`/verify-cockpit`, então o guard já está no trilho — não precisou de INV novo.
+
+Depois do fix, as minhas reclassificam certo: 385 A, 386 B, 387 A, 388 B, 389 B.
+
+**Exposição histórica medida:** varri `migration/*.sql` comparando os dois
+regexes. Duas migrations antigas tinham `UPDATE` que o gate deixou passar como
+TIPO A na época — `2026-05-18_116_dias_uteis_pendentes_finalizadas.sql` e
+`2026-08-27_362_oc49_sombra_e_monitor.sql`. Já rodaram; fica o registro, não há
+o que desfazer.
+
+### Dívida NÃO corrigida: seed de config com `ativo=true`
+
+A mig 387 classifica como TIPO A e **isso é por desenho**, não bug: o `dbq.py`
+trata `cliente_config*` como seed de configuração, e o comentário do
+`TABELAS_OPERACIONAIS` diz que seed é TIPO A "quando idempotente e nascendo
+desligado". A minha 387 é idempotente (`ON CONFLICT DO NOTHING`) mas entra com
+`ativo=true` — ou seja, nasce com a VISIBILIDADE ligada, e é justamente isso que
+muda o que o `sync-bastao` puxa.
+
+O classificador não verifica a condição "nascendo desligado" para essas tabelas.
+Não mexi: fechar isso reclassificaria seeds antigos e é decisão de política, não
+de código. Registrado aqui pra quem revisar a `docs/POLITICA_MIGRATIONS.md`.
+
+## Contraprova de ponta a ponta — 2026-09-08 16:31Z a 16:56Z
+
+O que faltava era provar o comportamento no fluxo real, não só na configuração.
+O Bastão tinha uma pendência de oc 13 aberta pra Prati **do próprio dia**:
+NF `001040401`, CTRC `AMB588440-3`, `cod_ultima_ocorrencia=13`,
+`data_ultima_ocorrencia=2026-09-08` (verificado via REST no Bastão).
+
+Depois do destravamento (mig 389, 16:00:30Z), a primeira `sync-bastao` foi a de
+**16:30:00Z**. Resultado medido:
+
+| O que se esperava | O que aconteceu |
+|---|---|
+| card nasce na fila do operador | **card `4bf3e59f-7162-423e-b6ad-195219457107` criado 16:31:04Z**, NF 1040401, CTRC AMB588440-3 |
+| responsável = a operadora do caso | `responsavel_relacionamento = LARISSA` |
+| estado = validação humana explícita | `state = AGUARDANDO_VALIDACAO_HUMANA`, 5 to-dos propostos |
+| eventos só de importação, sem ação | `BastaoCardImportado` + `TodoPropostoAutomaticamente`, ambos `actor=system/sync-bastao` |
+| agente NÃO age | `acoes_executadas_ssw = 0`, `acoes_agendadas = 0`, `agente_oc13_feedback = 0`, `agent_runs = 0` |
+
+O "não agiu" só tem valor porque o agente **rodou**: `cron.job_run_details`
+registra **5 execuções** do job 23 entre 16:31:04Z e 16:53:00Z, todas depois de
+o card existir. Cinco oportunidades de agir, zero ações.
+
+É exatamente a regra do negócio: a Prati **aparece** (deixa de ser invisível,
+que era a causa da NF 1037746 morrer) e o robô fica **quieto**, esperando o
+cliente ser notificado e autorizar.
+
+**Armadilha de medição no caminho:** a minha primeira sonda filtrava
+`cards.pagador in ('73856593001057', ...)` e devolvia 0 — conclusão errada de
+que o card não nascera. `cards.pagador` guarda o **nome** do cliente
+(`PRATI DONADUZZI E CIA LTDA`), não o CNPJ. Achei o card buscando por NF e CTRC.
+Quem for conferir isso de novo: filtre por NF/CTRC, ou por `pagador ilike`.

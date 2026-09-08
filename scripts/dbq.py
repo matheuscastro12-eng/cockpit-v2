@@ -196,7 +196,14 @@ def _limpar_sql(sql: str) -> str:
 
 
 _GATILHOS_B: list[tuple[str, re.Pattern]] = [
-    ("UPDATE em dado de produção", re.compile(r"\bUPDATE\s+(?:ONLY\s+)?[a-z_\".]+\s+SET\b", re.I)),
+    # ⚠ o `0-9` na classe do nome da tabela NÃO é cosmético (achado 2026-09-08).
+    # Sem ele, `[a-z_\".]+` para de casar no primeiro dígito: em
+    # `UPDATE public.cliente_config_oc13 SET ...` ele consome até `..._oc`,
+    # tropeça no `1` e o `\s+SET` não bate — o UPDATE vira TIPO A e escapa da
+    # exigência de `--autorizado-por`. Aconteceu de verdade com as migs 388 e
+    # 389 (correção 08.09). Vale pra qualquer tabela com dígito no nome
+    # (`cliente_config_oc13`, `cards2`, ...). O selftest cobre os dois casos.
+    ("UPDATE em dado de produção", re.compile(r"\bUPDATE\s+(?:ONLY\s+)?[a-z0-9_\".]+\s+SET\b", re.I)),
     ("DELETE em dado de produção", re.compile(r"\bDELETE\s+FROM\b", re.I)),
     ("TRUNCATE", re.compile(r"\bTRUNCATE\b", re.I)),
     ("DROP de objeto", re.compile(r"\bDROP\s+(?:TABLE|VIEW|MATERIALIZED\s+VIEW|FUNCTION|PROCEDURE|TYPE|INDEX|TRIGGER|SCHEMA|POLICY|COLUMN|CONSTRAINT|ROLE|EXTENSION)\b", re.I)),
@@ -386,6 +393,13 @@ def selftest() -> int:
         ("INSERT INTO public.feature_flags (key, description, enabled) VALUES ('f','d',false) ON CONFLICT (key) DO NOTHING;", "A"),
         ("INSERT INTO public.feature_flags (key, description, enabled) VALUES ('f','d',true);", "B"),
         ("UPDATE feature_flags SET enabled = true WHERE key='x';", "B"),
+        # guard do achado 2026-09-08: tabela com DÍGITO no nome também é B.
+        # Antes do fix a classe `[a-z_\".]+` parava no dígito e isto dava "A",
+        # deixando UPDATE passar sem --autorizado-por (migs 388/389).
+        ("UPDATE public.cliente_config_oc13 SET ativo = false WHERE cnpj_pagador='1';", "B"),
+        ("UPDATE public.cards2 SET x = 1 WHERE y = 2;", "B"),
+        # e a forma multi-linha, que é como as migrations do repo escrevem
+        ("UPDATE public.cliente_config_oc13\n   SET ativo = true\n WHERE cnpj_pagador IN ('1','2');", "B"),
         ("DELETE FROM todos WHERE id='a';", "B"),
         ("DROP VIEW IF EXISTS public.v_x;", "B"),
         ("ALTER TABLE public.cards DROP COLUMN foo;", "B"),
