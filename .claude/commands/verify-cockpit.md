@@ -2405,6 +2405,50 @@ else
   echo "INV-146: FAIL (chamada sem aspas devolveu [$INV146_RUN] em vez de 146 — o lancador do ritual esta corrompido)"
 fi
 
+# INV-147 (Carlos 2026-09-08, ADR 0026): POUCA TINTA NAO REPROVA CONVERSAO BOA.
+# O piso de 2% tratava "pouca tinta" como "conversao perdida" e derrubava o PDF
+# INTEIRO. Medido com PDFium nos arquivos reais: paginas de 1,37% (10803714.pdf,
+# Uniao Quimica) e 1,23% (Lexmark, AGV) estavam LEGIVEIS — falso positivo. E o
+# arquivo que quebra calado (0,38% no pdf.js) renderiza 2,53% com motor bom, ou
+# seja nenhum limiar separa as classes. Este guard cobra as 4 pecas:
+#   (a) o piso de 2% NAO foi mexido (a correcao e de consequencia, nao de limiar);
+#   (b) existe o piso de "folha sem tinta" que segue bloqueando o caso real;
+#   (c) o servidor NAO afrouxou (la nao tem humano pra ver a previa);
+#   (d) a telemetria manda operador.id, nao a string literal (a RLS exige
+#       actor_id = current_operador_id(); com a string, ZERO evento gravava).
+INV147_PISO=$(grep -c 'PISO_PIXELS_NAO_BRANCOS = 0.02' apps/cockpit-web/src/lib/pdfConversaoGuard.ts 2>/dev/null | tr -d ' ')
+INV147_SEMTINTA=$(grep -c 'PISO_PAGINA_SEM_TINTA' apps/cockpit-web/src/lib/pdfConversaoGuard.ts 2>/dev/null | tr -d ' ')
+INV147_POLITICA=$(grep -c 'politicaDaPagina' apps/cockpit-web/src/components/cards/ProposedActions.tsx 2>/dev/null | tr -d ' ')
+INV147_SRV=$(grep -c 'PISO_PIXELS_NAO_BRANCOS = 0.02' supabase/functions/_shared/pdf-conversao-guard.ts 2>/dev/null | tr -d ' ')
+INV147_ACTOR=$(grep -c 'actor_id: "front-conversao-pdf"' apps/cockpit-web/src/components/cards/ProposedActions.tsx 2>/dev/null | tr -d ' ')
+INV147_TEST=$(deno test --no-check --allow-read supabase/functions/_shared/pdf-conversao-guard.test.ts >/dev/null 2>&1 && echo PASS || echo FAIL)
+if [ "${INV147_PISO:-0}" -ge 1 ] && [ "${INV147_SEMTINTA:-0}" -ge 2 ] && [ "${INV147_POLITICA:-0}" -ge 1 ] && [ "${INV147_SRV:-0}" -ge 1 ] && [ "${INV147_ACTOR:-0}" -eq 0 ] && [ "$INV147_TEST" = "PASS" ]; then
+  echo "INV-147: PASS (piso=$INV147_PISO sem_tinta=$INV147_SEMTINTA politica=$INV147_POLITICA servidor_duro=$INV147_SRV actor_literal=$INV147_ACTOR test=$INV147_TEST)"
+else
+  echo "INV-147: FAIL (piso=$INV147_PISO sem_tinta=$INV147_SEMTINTA politica=$INV147_POLITICA servidor_duro=$INV147_SRV actor_literal=$INV147_ACTOR test=$INV147_TEST — actor_literal>0 significa telemetria cega pela RLS; servidor_duro=0 significa que alguem afrouxou o guard sem humano na frente)"
+fi
+
+# INV-148 (Carlos 2026-09-08, ADR 0026): VISIBILIDADE != AUTONOMIA na oc 13.
+# `cliente_config_oc13.ativo` decide se o card APARECE (sync-bastao);
+# `autonomo_ativo` decide se o AGENTE AGE (lanca oc 21 + cancela reentrega sem
+# aprovacao por card). Eram o mesmo interrutor: incluir um CNPJ pra aparecer
+# ligava o robo. Caso ancora NF 1037746 (PRATI) — o cliente precisa ser
+# notificado e autorizar ANTES. As duas direcoes sao bug:
+#   agente sem ler autonomo_ativo -> robo age em quem nao autorizou;
+#   sync lendo autonomo_ativo     -> cliente com robo off fica invisivel (o bug
+#                                    original, invertido).
+INV148_AGENTE=$(grep -c 'autonomo_ativo' supabase/functions/agente-oc13-autonomo/index.ts 2>/dev/null | tr -d ' ')
+INV148_FILTRO=$(grep -c 'autonomo_ativo !== false' supabase/functions/agente-oc13-autonomo/index.ts 2>/dev/null | tr -d ' ')
+INV148_SYNC=$(grep -c 'autonomo_ativo' supabase/functions/sync-bastao/index.ts 2>/dev/null | tr -d ' ')
+INV148_CLIENT=$(grep -c 'autonomo_ativo' supabase/functions/_shared/bastao-client.ts 2>/dev/null | tr -d ' ')
+INV148_OC13Q=$(grep -c 'cod_ultima_ocorrencia", "eq.13"' supabase/functions/_shared/bastao-client.ts 2>/dev/null | tr -d ' ')
+INV148_TEST=$(deno test --no-check --allow-read supabase/functions/_shared/oc13-visibilidade-vs-autonomia.test.ts >/dev/null 2>&1 && echo PASS || echo FAIL)
+if [ "${INV148_AGENTE:-0}" -ge 1 ] && [ "${INV148_FILTRO:-0}" -ge 1 ] && [ "${INV148_SYNC:-0}" -eq 0 ] && [ "${INV148_CLIENT:-0}" -eq 0 ] && [ "${INV148_OC13Q:-0}" -ge 1 ] && [ "$INV148_TEST" = "PASS" ]; then
+  echo "INV-148: PASS (agente=$INV148_AGENTE filtro=$INV148_FILTRO sync_limpo=$INV148_SYNC client_limpo=$INV148_CLIENT query_oc13=$INV148_OC13Q test=$INV148_TEST)"
+else
+  echo "INV-148: FAIL (agente=$INV148_AGENTE filtro=$INV148_FILTRO sync_limpo=$INV148_SYNC client_limpo=$INV148_CLIENT query_oc13=$INV148_OC13Q test=$INV148_TEST — sync/client precisam ser 0 e o agente precisa do filtro !== false)"
+fi
+
 echo "=== Fim Fase 8 ==="
 ```
 

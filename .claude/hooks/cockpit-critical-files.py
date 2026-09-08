@@ -19,7 +19,7 @@ import sys
 # Mantido em sync com docs/INVARIANTES_COCKPIT.md (seção "Mapa").
 INV_POR_ARQUIVO = {
     "supabase/functions/_shared/confirmar-acao-executada-ssw.ts": ["INV-002"],
-    "supabase/functions/sync-bastao/index.ts": ["INV-003", "INV-004", "INV-006", "INV-007", "INV-008", "INV-011", "INV-019", "INV-040"],
+    "supabase/functions/sync-bastao/index.ts": ["INV-003", "INV-004", "INV-006", "INV-007", "INV-008", "INV-011", "INV-019", "INV-040", "INV-148"],
     "supabase/functions/_shared/guard-anti-loop-criacao.ts": ["INV-040"],
     "supabase/functions/health-check/index.ts": ["INV-019", "INV-023"],
     "supabase/functions/_shared/inv023-indefinido-preso.ts": ["INV-023"],
@@ -36,6 +36,15 @@ INV_POR_ARQUIVO = {
     "supabase/functions/_shared/regras-auto-acao.ts": ["INV-004", "INV-008"],
     "supabase/functions/_shared/transicao-aguardando-cliente.ts": ["INV-006", "INV-008"],
     "supabase/config.toml": ["INV-009"],
+    # Correção 08.09 (ADR 0026). INV-147: pouca tinta não reprova conversão boa
+    # e uma página ruim não derruba o PDF inteiro. INV-148: na oc 13,
+    # `ativo` (visibilidade) e `autonomo_ativo` (autonomia) são interruptores
+    # separados — um nunca substitui o outro.
+    "apps/cockpit-web/src/lib/pdfConversaoGuard.ts": ["INV-147"],
+    "apps/cockpit-web/src/components/cards/ProposedActions.tsx": ["INV-147"],
+    "supabase/functions/_shared/pdf-conversao-guard.ts": ["INV-147"],
+    "supabase/functions/agente-oc13-autonomo/index.ts": ["INV-148"],
+    "supabase/functions/_shared/bastao-client.ts": ["INV-148"],
 }
 
 # Resumo curto de cada invariante (1 linha) pra exibir no hook sem precisar
