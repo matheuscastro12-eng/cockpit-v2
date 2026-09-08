@@ -1,0 +1,73 @@
+-- =============================================================================
+-- 2026-09-08_389 — DESTRAVA a PRATI: deploy do agente feito, visibilidade ON
+-- =============================================================================
+-- Correcao 08.09 (Carlos). ADR 0026. Reverte a trava da mig 388.
+--
+-- ## ORDEM E AUTORIZACAO
+--
+-- Carlos, 08/09, literal no chat: "siga com precisa ser feito e realize e
+-- deployu, estando tudo 100%; apague a brench. garanta que nao quebre nada e
+-- nem que tenha regressao. nunca presuma, apenas trabalhe com certeza."
+-- Autonomia: docs/POLITICA_MIGRATIONS.md, TIPO B, revisao 02/09.
+--
+-- ## PRE-CONDICAO CUMPRIDA (verificada, nao presumida)
+--
+-- A mig 388 poe a Prati em ativo=false porque a versao EM PRODUCAO do
+-- agente-oc13-autonomo nao conhecia `autonomo_ativo` e decidia elegibilidade
+-- so por `ativo=true`. Essa condicao ACABOU:
+--
+--   * `python3 scripts/deploy_pendente.py` em 08/09 15:56Z: "nenhuma funcao
+--     pendente de deploy";
+--   * agente-oc13-autonomo = v57, deployada 15:56Z, do commit 656d6d3 — que e
+--     exatamente o commit que introduz o filtro `autonomo_ativo !== false`;
+--   * converter-anexo-pdf = v3, mesma janela, do commit 1682951;
+--   * deploy feito pelo trilho (`supabase functions deploy ... --project-ref`)
+--     com as 2 funcoes que o script listou, sem deixar nenhuma de fora
+--     (regra absoluta do Caio 04/09).
+--
+-- ## O QUE ELA FAZ, E SO ISSO
+--
+-- Volta ativo=true nas 2 linhas da PRATI e limpa o marcador [TRAVA mig 388]
+-- da observacao. `autonomo_ativo` NAO e tocado — segue false nas duas, entao a
+-- Prati passa a APARECER na fila da Larissa com o robo QUIETO. E isso que a
+-- regra do negocio pede: "o cliente sempre precisa ser notificado antes e
+-- somente com a autorizacao dele e possivel seguir" (Carlos, 08/09).
+--
+-- ⚠ Blast radius: 2 linhas, as duas da PRATI (WHERE por cnpj_pagador
+--   explicito). As outras 15 nao sao tocadas e seguem ativo=true/robo=true.
+--
+-- ⚠ O que muda no comportamento, na pratica:
+--   * sync-bastao (le SO `ativo`, INV-148) volta a puxar a pendencia de oc 13
+--     da Prati -> o card nasce na fila do operador. ESTE e o ganho: a NF
+--     1037746 e as futuras param de ficar invisiveis.
+--   * agente-oc13-autonomo (le `autonomo_ativo`) enxerga false e NAO age.
+--
+-- ## COMO VALIDAR (depois de aplicar)
+--
+--   1. select nome_cliente, ativo, autonomo_ativo from cliente_config_oc13
+--        where cnpj_pagador in ('73856593001057','73856593000166');
+--      -> esperado: ativo=true, autonomo_ativo=false nas duas.
+--   2. Depois do proximo sync-bastao (cron 27, */30): card de oc 13 da Prati
+--      existe em `cards`.
+--   3. Depois do proximo ciclo do agente (cron 23, 3-59/5): NENHUMA decisao
+--      autonoma pra esses CNPJs. Conferir que nao surgiu acao executada nem
+--      agendamento de veto pros cards da Prati.
+--
+-- ## COMO DESFAZER
+--
+--   UPDATE public.cliente_config_oc13 SET ativo = false
+--    WHERE cnpj_pagador IN ('73856593001057','73856593000166');
+--   (volta ao estado da mig 388 — Prati invisivel, robo segue false)
+--
+-- ⚠ SEM BEGIN/COMMIT interno (regra 13/08): o dbq.py envolve na transacao dele.
+-- =============================================================================
+
+UPDATE public.cliente_config_oc13
+   SET ativo = true,
+       observacao = regexp_replace(observacao, '\s*\[TRAVA mig 388[^\]]*\]', '', 'g')
+ WHERE cnpj_pagador IN ('73856593001057', '73856593000166');
+
+-- Conferencia:
+--   select nome_cliente, cnpj_pagador, ativo, autonomo_ativo, observacao
+--     from public.cliente_config_oc13
+--    where cnpj_pagador in ('73856593001057','73856593000166');
