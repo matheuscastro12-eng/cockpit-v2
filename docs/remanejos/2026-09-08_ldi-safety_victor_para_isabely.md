@@ -5,9 +5,10 @@
 **Classificação:** remanejo VIA RPC → liberado pro Carlos
 (`docs/POLITICA_MIGRATIONS.md`). Remanejo à mão continuaria TIPO B / só Caio.
 
-> **STATUS: PREPARADO E VALIDADO — NÃO EXECUTADO.**
-> Dry-run contra produção aprovado (seção 6). A execução aguarda o
-> pré-requisito da seção 3 (troca no SSW) e ordem explícita do Carlos.
+> **STATUS: EXECUTADO EM PRODUÇÃO em 2026-09-08 14:53**, com ordem explícita do
+> Carlos ("Boa! Fiz isso já. Se estiver tudo certo, pode rodar") e após ele
+> confirmar a troca da espécie/responsável no SSW. Todos os critérios de
+> conclusão passaram e a idempotência foi confirmada em produção. Ver seção 11.
 
 ---
 
@@ -72,10 +73,10 @@ Todos hoje no **VICTOR**. 5 TRANSFERIDO · 3 RESOLVIDO.
 `AtualizadoViaPortalSsw` (13:02). **O cliente respondeu hoje e o agente tratou.**
 É o único card com atividade recente — os outros 7 são histórico.
 
-## 3. Pré-requisito humano — PENDENTE
+## 3. Pré-requisito humano — FEITO
 
-Trocar a espécie/responsável de LDI SAFETY para **ISABELY no SSW**, ANTES de
-rodar a RPC. Carlos informou em 2026-09-08 que faria.
+Espécie/responsável de LDI SAFETY **já trocada para ISABELY no SSW** por Carlos,
+confirmado por ele em 2026-09-08 imediatamente antes da execução.
 
 Sem isso, o trigger `resolve_assigned_operator_from_name` (migs 007/305) — que
 casa card novo por NOME vindo do SSW e não olha carteira — devolve card novo pro
@@ -238,3 +239,67 @@ silenciosamente.
 
 **Não regenerar a mig 307** para "consertar a origem": ela é o retrato imutável da
 planilha daquela data e outras coisas dependem dela. A correção é o remanejo.
+
+---
+
+## 11. Execução em produção — 2026-09-08 14:53
+
+**Pré-check imediato antes do disparo** (para garantir que nada mudou entre o
+dry-run e a execução — a NF 21413 estava viva): dono=VICTOR · segmento=`008 EPI` ·
+cards=8, todos no VICTOR · carteira VICTOR=44 · ISABELY=385 · ação armada=0 ·
+último evento da NF 21413 = 13:02:39. **Idêntico ao baseline do dry-run.**
+
+**Relatório da RPC:**
+
+```json
+{"cnpj": "27153141000281", "cliente": "LDI SAFETY",
+ "de": ["VICTOR"], "para": "ISABELY",
+ "cards": 8, "contatos": 1, "tracking": 1, "alertas": 0, "veto_desarmado": 0,
+ "autorizado_por": "CARLOS"}
+```
+
+Idêntico, número a número, ao previsto pelo dry-run.
+
+**Critérios de conclusão — todos passaram:**
+
+| # | Verificação | Esperado | Resultado |
+|---|---|---|---|
+| 1 | Na carteira da ISABELY | 1 | **1** ✅ |
+| 2 | Em qualquer outra carteira | 0 | **0** ✅ |
+| 3 | CNPJ em 2 carteiras (invariante global) | 0 | **0** ✅ |
+| 4 | Segmento do cliente | `043 CURVA F` | **`043 CURVA F`** ✅ |
+| 5 | Cards na ISABELY | 8 | **8** ✅ |
+| 6 | Cards ainda no VICTOR | 0 | **0** ✅ |
+| 6b | Cards sem dono | 0 | **0** ✅ |
+| 7 | Carteira VICTOR | 43 | **43** ✅ |
+| 8 | Carteira ISABELY | 386 | **386** ✅ |
+| 9 | Clientes seg `008` / `043` | 10 / 374 | **10 / 374** ✅ |
+| 10 | Total de clientes (nada criado/apagado) | 853 | **853** ✅ |
+| 11 | Contato / tracking na ISABELY | 1 / 1 | **1 / 1** ✅ |
+| 12 | `card_events` `OperadorReatribuido` hoje | 8 | **8** ✅ |
+| 13 | Total de cards do cliente | 8 | **8** ✅ |
+
+**Prova pela RLS — identidade real de cada operador simulada** (`request.jwt.claims`
+com o `user_id` verdadeiro + `role=authenticated`, contando os cards do LDI que
+cada um enxerga com a policy rodando de verdade):
+
+```
+ISABELY enxerga 8 card(s) do LDI
+VICTOR  enxerga 0 card(s) do LDI
+```
+
+É esta linha que fecha o caso: **o VICTOR não vê mais nada do cliente** — nem pela
+carteira, nem pela porta do segmento (seção 4.1). O `008` deixou de alcançá-lo
+porque o cliente virou `043`.
+
+**Idempotência confirmada em produção:** 2ª execução devolveu `de: []`, `cards: 0`,
+`contatos: 0`, `tracking: 0` — nada mexido, nenhum evento duplicado.
+
+**Em aberto até acontecer:** o critério final "o próximo card do LDI nasce direto
+na ISABELY". Os Paths 1, 3 e 4 do resolver apontam ISABELY e a espécie no SSW já
+foi trocada, fechando a porta lateral do trigger por nome — mas só o primeiro card
+novo confirma na prática.
+
+**Passagem de bastão avisada:** a NF 21413 (tratativa viva, cliente respondeu às
+12:34 de hoje) saiu da tela do VICTOR e entrou na da ISABELY no momento da
+execução. Histórico preservado — o card carrega o `OperadorReatribuido`.
