@@ -65,19 +65,40 @@ describe("politicaDaPagina — INV-147 (correção 08.09)", () => {
     expect(politicaDaPagina("warning_pdfjs", 0.0001)).toBe("bloquear");
   });
 
-  it("ÂNCORA REAL — 10803714.pdf pág 2 (União Química/Larissa, 1,37%) vai pra CONFIRMAÇÃO", () => {
+  it("ÂNCORA REAL — 10803714.pdf pág 2 (União Química/Larissa) vai pra CONFIRMAÇÃO", () => {
     // Página renderizada e inspecionada: Documento de Transporte legível, com
     // placa manuscrita SEM-7B68 e código de barras. Bloquear isso é o bug.
+    // Medida nos DOIS motores: pdf.js (o do front) = 1,35% · PDFium = 1,37%.
+    expect(politicaDaPagina("pagina_quase_branca", 0.0135)).toBe("confirmar");
     expect(politicaDaPagina("pagina_quase_branca", 0.0137)).toBe("confirmar");
   });
 
-  it("ÂNCORA REAL — Lexmark pág 4 (AGV/Maria, 1,23%) vai pra CONFIRMAÇÃO", () => {
+  it("ÂNCORA REAL — Lexmark pág 4 (AGV/Maria) vai pra CONFIRMAÇÃO", () => {
     // "AGENDAMENTOS / Coleta na AGV", placa e motorista à mão. Também legível.
+    // pdf.js = 1,22% · PDFium = 1,23%.
+    expect(politicaDaPagina("pagina_quase_branca", 0.0122)).toBe("confirmar");
     expect(politicaDaPagina("pagina_quase_branca", 0.0123)).toBe("confirmar");
   });
 
-  it("ÂNCORA REAL — 'minuta assinada.pdf' (0,38%, quebra calada) continua BLOQUEADA", () => {
-    // Não regride: este é o caso que justificou o guard em 17/07.
+  it("ÂNCORA REAL — pág 1 do 10803714 (6,34% no pdf.js) passa direto, sem perguntar", () => {
+    // Era ela que ia pro lixo junto com a pág 2 no comportamento antigo.
+    const v = avaliarPaginaConvertida(rgba(10_000, 0.0634), false);
+    expect(v.quebrada).toBe(false);
+  });
+
+  it("ÂNCORA REAL — decodificador JBIG2 DESLIGADO continua BLOQUEADO (0,42% e 0,10%)", () => {
+    // Medido em 08/09 rodando o PRÓPRIO pdf.js sem conseguir carregar o wasm
+    // ("Jbig2Error: JBig2 failed to initialize") sobre o 10803714.pdf real:
+    // pág 1 = 0,42%, pág 2 = 0,10%. É a falha que o piso existe pra barrar —
+    // se os assets de public/pdfjs-wasm/ pararem de ser servidos, nenhuma
+    // página em branco chega como prévia pro operador aprovar no automático.
+    expect(politicaDaPagina("pagina_quase_branca", 0.0042)).toBe("bloquear");
+    expect(politicaDaPagina("pagina_quase_branca", 0.001)).toBe("bloquear");
+  });
+
+  it("ÂNCORA HISTÓRICA — 0,38% (minuta assinada, era pré-wasm) segue bloqueado", () => {
+    // A ADR 0014 mediu isso em 17/07. NÃO reproduz mais: com o wasmUrl (25/07)
+    // o mesmo arquivo renderiza 2,48% no pdf.js e passa. Mantido só como cinto.
     expect(politicaDaPagina("pagina_quase_branca", 0.0038)).toBe("bloquear");
   });
 
@@ -85,11 +106,11 @@ describe("politicaDaPagina — INV-147 (correção 08.09)", () => {
     expect(politicaDaPagina("pagina_quase_branca", 0)).toBe("bloquear");
   });
 
-  it("o piso de 'sem tinta' fica ENTRE a quebra medida (0,38%) e o falso positivo medido (1,23%)", () => {
-    // Se alguém mexer no piso, esta asserção denuncia: ele precisa continuar
-    // separando as duas classes que medimos de verdade.
-    expect(PISO_PAGINA_SEM_TINTA).toBeGreaterThan(0.0038);
-    expect(PISO_PAGINA_SEM_TINTA).toBeLessThan(0.0123);
+  it("o piso de 'sem tinta' fica ENTRE as duas classes MEDIDAS com o pdf.js", () => {
+    // decodificador off: até 0,42% · conteúdo legítimo: a partir de 1,22%.
+    // Se alguém mexer no piso, esta asserção denuncia.
+    expect(PISO_PAGINA_SEM_TINTA).toBeGreaterThan(0.0042);
+    expect(PISO_PAGINA_SEM_TINTA).toBeLessThan(0.0122);
   });
 
   it("limiar do piso sem tinta: exatamente no piso já pede confirmação", () => {

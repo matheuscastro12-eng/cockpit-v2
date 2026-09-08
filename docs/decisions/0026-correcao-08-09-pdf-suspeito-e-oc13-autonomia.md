@@ -35,6 +35,24 @@ O diagnóstico não saiu de leitura de código. Saiu de medição.
 
 E renderizei as duas páginas reprovadas em PNG **para olhar**: a pág. 2 do `10803714.pdf` é o "DOCUMENTO DE TRANSPORTE 10803714", com placa manuscrita `SEM-7B68`, data `22/07/26` e código de barras; a pág. 4 do Lexmark é uma ficha "AGENDAMENTOS / Coleta na AGV" com placa e motorista à mão. **Documentos perfeitamente legíveis, reprovados pelo guard.**
 
+### Contraprova no motor REAL do front (pdf.js), 08/09
+
+O PDFium é o motor do **servidor**. Como a decisão acontece no front, montei um harness que replica o `convertPdfBlobToJpegFiles` fielmente — `pdfjs-dist@5.7.284` legacy + `wasmUrl` + render em canvas na escala 2.5 + hook no `console.warn` + o mesmo predicado de pixel — e rodei nos arquivos reais:
+
+| arquivo | pág | **pdf.js** | PDFium | política nova |
+|---|---|---|---|---|
+| `10803714.pdf` | 1 | **6,34%** | 6,41% | passa |
+| `10803714.pdf` | 2 | **1,35%** | 1,37% | **confirma (prévia)** |
+| `Scanned_from_a_Lexmark….pdf` | 4 | **1,22%** | 1,23% | **confirma (prévia)** |
+| `minuta assinada.pdf` | 1 | **2,48%** | 2,53% | passa |
+| `NF 135724.pdf` | 1 | **6,03%** | 6,16% | passa |
+
+Os dois motores concordam dentro de **0,15 pp**. E o resultado reproduz exatamente o que a produção mostrou no print da Larissa: pág. 1 passa, pág. 2 é a reprovada — o que valida o harness contra a realidade.
+
+**Correção de premissa (importante):** a ADR 0014 registra `minuta assinada.pdf` quebrando **calado** a 0,38%. Isso **não reproduz mais** — hoje o arquivo renderiza 2,48% e passa. Aquela medição é de 17/07 e o `wasmUrl` entrou em **25/07**, depois dela. Logo o 0,38% é da era pré-wasm e não serve de âncora viva.
+
+Isso obrigou a **recalibrar o piso de 0,5% em dado novo**. Rodando o pdf.js sem conseguir carregar o wasm (`Jbig2Error: JBig2 failed to initialize`) sobre o mesmo arquivo, medi a classe "decodificador desligado": pág. 1 = **0,42%**, pág. 2 = **0,10%**. Então o piso de 0,5% fica entre **0,42%** (falha) e **1,22%** (conteúdo legítimo) — fronteira **medida**, não estimada. E o cenário que ele protege é real e concreto: se os assets de `public/pdfjs-wasm/` deixarem de ser servidos, as páginas caem pra 0,1–0,4% e são **barradas**, em vez de chegarem como prévia em branco pro operador aprovar no automático.
+
 Também verifiquei que a produção **não** está defasada: `cockpit-aisalexpress.vercel.app/pdfjs-wasm/jbig2.wasm` responde 206 `application/wasm`, o bundle publicado contém `pdfjs-wasm`, `ConversaoPdfBloqueadaGuard` e o regex do warning, e os `.wasm` locais são byte-a-byte iguais ao `pdfjs-dist@5.7.284` instalado. A hipótese "o wasm não chegou em produção" foi **descartada com evidência**.
 
 **Caso 2.** No Cockpit: zero cards com aquela NF ou CTRC (busquei pelos dois) — o card nunca existiu, não era problema de busca nem de visibilidade. No Bastão a pendência existe e está completa: `oc 13`, `28/08`, `cnpj_pagador 73856593001057` (PRATI DONADUZZI A3), `responsavel_atual "operacao"`, **`responsavel_relacionamento "LARISSA"`**, segmento `018`. Os dois CNPJs da Prati estão na carteira da Larissa. A Prati já tivera **14** cards com oc 13, todos terminando em `TRANSFERIDO`.

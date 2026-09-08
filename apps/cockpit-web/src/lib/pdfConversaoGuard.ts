@@ -59,10 +59,27 @@ export const PISO_PIXELS_NAO_BRANCOS = 0.02;
 
 /**
  * Correção 08.09: abaixo disso a folha está praticamente sem tinta e segue
- * BLOQUEADA sem perguntar nada. Calibrado no único caso real de conversão
- * quebrada silenciosa que temos medido: `minuta assinada.pdf` = 0,38%
- * (o mesmo arquivo renderiza 2,53% no PDFium, que decodifica JBIG2).
- * Os falsos positivos medidos (1,23% e 1,37%) ficam ACIMA deste piso.
+ * BLOQUEADA sem perguntar nada.
+ *
+ * Calibrado em MEDIÇÃO, com o próprio pdf.js (08/09) — as duas classes:
+ *
+ *   decodificador JBIG2 DESLIGADO (falha real, reproduzida rodando o pdf.js
+ *   sem conseguir carregar o wasm — `Jbig2Error: JBig2 failed to initialize`):
+ *     `10803714.pdf` pág 1 = **0,42%** · pág 2 = **0,10%**
+ *
+ *   conteúdo legítimo, decodificador FUNCIONANDO:
+ *     `10803714.pdf` pág 2 = **1,35%** · `Scanned_from_a_Lexmark….pdf` pág 4
+ *     = **1,22%**
+ *
+ * 0,5% fica entre 0,42% e 1,22% — fronteira MEDIDA, não estimada. É exatamente
+ * o cenário que importa: se um dia os assets `public/pdfjs-wasm/` deixarem de
+ * ser servidos, as páginas voltam pra faixa 0,1–0,4% e são BARRADAS, em vez de
+ * chegarem como prévia em branco pro operador aprovar no automático.
+ *
+ * Nota histórica: a ADR 0014 cita `minuta assinada.pdf` quebrando CALADO a
+ * 0,38% (17/07). Esse modo de falha **não reproduz mais** — o mesmo arquivo
+ * hoje renderiza 2,48% no pdf.js e passa, porque o `wasmUrl` (25/07) entrou
+ * DEPOIS daquela medição. O 0,38% é da era pré-wasm; não usar como âncora viva.
  */
 export const PISO_PAGINA_SEM_TINTA = 0.005;
 

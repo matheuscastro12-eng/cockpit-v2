@@ -907,7 +907,11 @@ print('Devolucao — acao ✅')"
 | `minuta assinada.pdf` (quebra CALADA no pdf.js: 0,38%) | 1 | 2,53% | ok com decodificador bom |
 | `NF 135724.pdf` (âncora da ADR 0014) | 1 | 6,16% | ok |
 
-Ou seja: **conteúdo legítimo (1,23%) e conversão quebrada (0,38%) ocupam a mesma faixa estreita**, e o próprio arquivo que quebra calado renderiza a 2,53% quando o motor funciona. Nenhum limiar separa as classes com margem — por isso o piso de 2% **não** foi mexido; mudou a consequência dele. O corte de 0,5% separa "barrar" de "perguntar pro humano", não de "aceitar calado".
+**Contraprova no motor real do front (pdf.js, 08/09)** — harness replicando o `convertPdfBlobToJpegFiles` (legacy + `wasmUrl` + canvas 2.5 + mesmo predicado): pág. 1 do `10803714` = **6,34%** (passa), pág. 2 = **1,35%** (confirma), Lexmark pág. 4 = **1,22%** (confirma), `minuta assinada` = **2,48%** (passa), `NF 135724` = **6,03%** (passa). Os dois motores concordam dentro de **0,15 pp**, e o resultado reproduz o print da produção (pág. 1 passa, pág. 2 reprova).
+
+O piso de 2% **não** foi mexido; mudou a consequência dele. O corte de 0,5% separa "barrar" de "perguntar pro humano", não de "aceitar calado" — e está calibrado em duas classes MEDIDAS com o pdf.js: **decodificador desligado** (rodando sem o wasm, `Jbig2Error: JBig2 failed to initialize`) dá 0,42% e 0,10%; **conteúdo legítimo** dá 1,22% e 1,35%. O piso fica entre 0,42% e 1,22%.
+
+**Premissa corrigida:** o `minuta assinada.pdf` que a ADR 0014 registrou quebrando *calado* a 0,38% **não reproduz mais** — aquela medição é de 17/07 e o `wasmUrl` entrou em 25/07, depois dela. Não usar o 0,38% como âncora viva. O cenário real que o piso protege hoje é os assets de `public/pdfjs-wasm/` deixarem de ser servidos.
 
 **Assimetria deliberada:** `_shared/pdf-conversao-guard.ts` (servidor) mantém o piso como **bloqueio duro**, porque roda em conversão autônoma do romaneio, sem humano pra olhar a prévia. Mesmo limiar, política diferente, de propósito.
 
