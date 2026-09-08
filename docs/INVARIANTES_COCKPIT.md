@@ -893,6 +893,65 @@ print('Devolucao — acao ✅')"
 
 ---
 
+## INV-147 — Pouca tinta não reprova conversão de PDF; o operador confere a página
+
+**Regra (Carlos 2026-09-08, ADR 0026):** no front, página convertida com pouca tinta **não** pode ser reprovada sozinha. Só há bloqueio duro quando (a) o pdf.js avisou que desistiu de desenhar a imagem (`dependent image isn't ready`), ou (b) a folha está praticamente sem tinta (`< PISO_PAGINA_SEM_TINTA`, 0,5%). Na faixa 0,5%–2% o modal mostra a **prévia** e o operador decide. E **uma** página reprovada nunca derruba o PDF inteiro.
+
+**Por quê:** o piso de 2% tratava "pouca tinta" como "conversão perdida". Medido em 08/09 com PDFium (motor que decodifica JBIG2), nos arquivos reais de produção:
+
+| Arquivo | Página | Tinta | Realidade (inspecionada) |
+|---|---|---|---|
+| `10803714.pdf` (União Química / Larissa) | 1 | 6,41% | ok |
+| `10803714.pdf` | 2 | **1,37%** | **legível** — Documento de Transporte, placa manuscrita SEM-7B68, código de barras |
+| `Scanned_from_a_Lexmark….pdf` (AGV / Maria) | 4 | **1,23%** | **legível** — ficha de agendamento, placa e motorista à mão |
+| `minuta assinada.pdf` (quebra CALADA no pdf.js: 0,38%) | 1 | 2,53% | ok com decodificador bom |
+| `NF 135724.pdf` (âncora da ADR 0014) | 1 | 6,16% | ok |
+
+**Contraprova no motor real do front (pdf.js, 08/09)** — harness replicando o `convertPdfBlobToJpegFiles` (legacy + `wasmUrl` + canvas 2.5 + mesmo predicado): pág. 1 do `10803714` = **6,34%** (passa), pág. 2 = **1,35%** (confirma), Lexmark pág. 4 = **1,22%** (confirma), `minuta assinada` = **2,48%** (passa), `NF 135724` = **6,03%** (passa). Os dois motores concordam dentro de **0,15 pp**, e o resultado reproduz o print da produção (pág. 1 passa, pág. 2 reprova).
+
+O piso de 2% **não** foi mexido; mudou a consequência dele. O corte de 0,5% separa "barrar" de "perguntar pro humano", não de "aceitar calado" — e está calibrado em duas classes MEDIDAS com o pdf.js: **decodificador desligado** (rodando sem o wasm, `Jbig2Error: JBig2 failed to initialize`) dá 0,42% e 0,10%; **conteúdo legítimo** dá 1,22% e 1,35%. O piso fica entre 0,42% e 1,22%.
+
+**Premissa corrigida:** o `minuta assinada.pdf` que a ADR 0014 registrou quebrando *calado* a 0,38% **não reproduz mais** — aquela medição é de 17/07 e o `wasmUrl` entrou em 25/07, depois dela. Não usar o 0,38% como âncora viva. O cenário real que o piso protege hoje é os assets de `public/pdfjs-wasm/` deixarem de ser servidos.
+
+**Assimetria deliberada:** `_shared/pdf-conversao-guard.ts` (servidor) mantém o piso como **bloqueio duro**, porque roda em conversão autônoma do romaneio, sem humano pra olhar a prévia. Mesmo limiar, política diferente, de propósito.
+
+**Arquivos:** `apps/cockpit-web/src/lib/pdfConversaoGuard.ts`, `apps/cockpit-web/src/components/cards/ProposedActions.tsx`, `supabase/functions/_shared/pdf-conversao-guard.ts`.
+
+**Como verificar:**
+```bash
+cd apps/cockpit-web && npx vitest run src/lib/pdfConversaoGuard.test.ts
+deno test --no-check --allow-read supabase/functions/_shared/pdf-conversao-guard.test.ts
+```
+
+**Dívida aberta (medida, não resolvida):** o PDFium do `converter-anexo-pdf` renderiza corretamente os arquivos que o pdf.js perde. O fallback certo pro sinal (a) é mandar o arquivo pra ele — hoje impossível pelo front porque a edge é `service role only`. Enquanto isso, o contorno segue sendo print/foto.
+
+---
+
+## INV-148 — Na oc 13, VISIBILIDADE e AUTONOMIA são interruptores separados
+
+**Regra (Carlos 2026-09-08, ADR 0026):** em `cliente_config_oc13`, `ativo` decide se o card **aparece** pro operador (lido pelo `sync-bastao` / `bastao-client`) e `autonomo_ativo` decide se o **agente age** (lido só pelo `agente-oc13-autonomo`, com `!== false`). Um jamais pode ser usado no lugar do outro. Cliente novo nasce visível e **sem** robô (`DEFAULT false`, mig 386).
+
+**Por quê:** era um interruptor só. Incluir um CNPJ pra o card aparecer ligava, no mesmo ato, um agente que lança **oc 21 + cancela reentrega** por `auto_aprovar_e_executar`, sem aprovação por card — e que agenda a ação destacada numa **janela de veto de 60 min** que pode disparar e-mail pro cliente. Medido em 08/09: 962 decisões do agente (669 sugerir 54+e-mail, 141 sugerir 21+cancel, 129 sugerir 56, **23 autônomas**), **1.379** oc 21 lançadas com sucesso, flag `acao_autonoma_veto_enabled` **ligada** e a LARISSA habilitada em `acoes_autonomas_veto_operadores`.
+
+Isso contraria a regra do negócio (Carlos, verbatim 08/09): **"o cliente sempre precisa ser notificado antes e somente com a autorização deles é possível seguir."**
+
+**Caso âncora — NF 1037746 / CTRC PRT562381-2 (PRATI DONADUZZI, Larissa):** oc 13 lançada 28/08 15:36, nunca virou card, descoberta só porque o cliente cobrou. A pendência existia no Bastão com `responsavel_relacionamento=LARISSA`; o pagador `73856593001057` não estava na exceção. A Prati já tivera **14** cards de oc 13, todos terminando em TRANSFERIDO. Fix: entra com `ativo=true, autonomo_ativo=false` (mig 387) — aparece, mas nada age sem o cliente autorizar.
+
+**Contra-regra:** o inverso também é bug. Se o `sync-bastao` passar a filtrar por `autonomo_ativo`, o cliente com robô desligado volta a ficar invisível — o bug original, invertido. O guard testa as duas direções.
+
+**Arquivos:** `migration/2026-09-08_385/386/387_*.sql`, `supabase/functions/agente-oc13-autonomo/index.ts`, `supabase/functions/_shared/bastao-client.ts`, `supabase/functions/sync-bastao/index.ts`.
+
+**Como verificar:**
+```bash
+deno test --no-check --allow-read supabase/functions/_shared/oc13-visibilidade-vs-autonomia.test.ts
+# e no banco, depois das migrations:
+python3 scripts/dbq.py -tA -c "select nome_cliente, cnpj_pagador, ativo, autonomo_ativo from cliente_config_oc13 order by 1,2;"
+```
+
+**O que NÃO fazer:** pôr a oc 13 como Relacionamento no dicionário. Mediria ~120 cards caindo de uma vez em todas as carteiras (contagem do Bastão em 08/09).
+
+---
+
 ## Histórico
 
 - 2026-05-14 — versão inicial com 10 INVs, motivada pelo bug NF 1075381.
@@ -915,3 +974,4 @@ print('Devolucao — acao ✅')"
 - 2026-09-03 (tarde) — **INV-141 reforçado + INV-140 do Carlos renumerado para INV-144.** Ao auditar a TERCEIRA cópia do parser (a dívida registrada de manhã) para decidir se dava pra consolidar, descobriu-se que ela **não** é equivalente: `agente-sugere-ocs-padrao` limpa com `removerMarcadoresSswmobile` (que remove comentários/tags HTML via `sanitizarTextoSsw`, mais `Protocolo:`/`SEFAZ`), enquanto `seguir-parcial-auto` usava só o `limparInstrucao` fraco. Medido: `9 <!--x--><u>GPS</u>` → fraco devolve `null`, forte devolve `{qtd:9}`. Numa NF de 9 volumes o fraco lançaria 55 num extravio TOTAL — exatamente o modo de falha que o D2 existe pra impedir. A fraqueza é inofensiva em `analisarExtravio` (nulo→TOTAL, conservador) e perigosa aqui porque o D3 inverte o default. Fix: `lerQtdDaInstrucao()` aplica a limpeza forte **só dentro do módulo** — `limparInstrucao` NÃO foi tocado, porque serve `analisarExtravio` de todos os 651 clientes. Consolidar as três cópias segue **descartado**: trocar o forte pelo fraco (ou vice-versa) em `agente-sugere-ocs-padrao` mudaria classificação para todos. Também adicionados guards de deploy (`.claude/deploy-guards.json`) para os 3 arquivos da 55 automática, que não tinham nenhum.
 - 2026-09-03 — INV-141/142/143 adicionados junto com o ADR 0025 (oc 55 automática pra clientes com autorização permanente de seguir parcial: 4 CNPJs, 1 do DUILIO e 3 do FELIPE). NÃO nasceram de bug em produção — nasceram de uma medição feita ANTES de codar. A regra do briefing ("se a mensagem não disser 'extravio total', é parcial") foi confrontada com 180 dias de instruções reais desses clientes e classificaria errado 4 de 23 cards de oc 06 (17%): a unidade escreve SÓ O NÚMERO de volumes faltantes, sem a palavra TOTAL, e quando esse número é igual ao total de volumes da NF o extravio é total. Âncora NF 29642 (instrução `9`, NF de 9 volumes) receberia uma 55 mandando a operação entregar carga que não existe mais. Daí o INV-141 (a inversão vive só dentro da whitelist; sinal de total = palavra OU qtd>=volumes). A investigação achou de quebra: (a) `OCS_NOTIFICOU_APOS_EXTRAVIO` sem a 55, que faria o card de volta (19/10/35) exibir banner falso "cliente não notificado" — INV-143, que fecha uma divergência pré-existente com `houve55AposExtravio`; (b) `extravio-enrichment` arrastando `bastao-rules`, que faz query em TOP-LEVEL AWAIT, impedindo teste puro — parser extraído pra `extravio-qtd-volumes.ts` (que desde o ADR 0012 nunca tivera teste, apesar de decidir total×parcial); (c) uma TERCEIRA cópia do mesmo parser em `agente-sugere-ocs-padrao` (dívida registrada). INV-142 trava o estado inicial: flag OFF, sombra ON, seed inativo, loader fail-closed — porque ocorrência no SSW não tem desfazer. REGRA INVIOLÁVEL: extravio total nunca vira 55, e cliente fora da whitelist nunca muda de comportamento.
 - 2026-07-26 — INV-055 adicionado pós-incidente de custo (domingo sem operação: $39,34 vs $8/dia, 4x). Causa raiz ÚNICA em cadeia, provada no `anthropic_usage_log` + `card_events`: `maxTokens: 700` no interpretador era MENOR que a resposta legítima do próprio schema (3 `trecho_verbatim` de evidência + motivo + motivo_combo) → 289 respostas bateram exatamente em 700 = cortadas no meio → JSON inválido → `completeJson` repetia com o MESMO teto (retry condenado, cortava igual) → 268 `InterpretadorRespostaClienteFalhou` (0 em todos os dias anteriores) → o card não recebia `ia_sugestao_oc_resposta` → `cron-ia-resposta-pendentes` seleciona exatamente "respondeu mas sem sugestão" e o devolvia a cada 5 min, sem limite de tentativas → 899 chamadas Anthropic sobre 11 mensagens (82 por mensagem; NF 164346 sozinha: 326 chamadas, 137 falhas, das 07:03 às 17:11). Amplificador: a onda 3 de 25/07 passou o `scan-email-pre-card` a drenar a fila em loop de 45s (backlog de 94k), realimentando as mesmas mensagens. Fix em 4 camadas: (1) teto 1800 + limites de tamanho explícitos no prompt; (2) retry que DOBRA o teto quando `stop_reason=max_tokens` (remove a causa em vez de repeti-la); (3) `repararJsonTruncado` salva o maior prefixo válido — os campos de decisão vêm primeiro no schema — entrando com confiança ≤0,5 e pendência visível; (4) breaker `MAX_FALHAS_LLM` por (card, mensagem): esgotado, aplica sugestão DETERMINÍSTICA conservadora (mantém 54/59 do trilho, zero ação automática em SSW) pela MESMA estrutura do fluxo normal, então o card segue com banner, propostas e to-dos, marcado `leitura_degradada`. REGRA INVIOLÁVEL: card com resposta de cliente nunca fica sem interpretação e sem ações — e falha de leitura nunca vira loop infinito de custo. Regra do Caio (verbatim): "Não podemos deixar o card sem interpretar, sem ações, e sem nada. (…) Não adianta só jogar para o operador fazer."
+- 2026-09-08 — **INV-147 e INV-148 adicionados junto com o ADR 0026** (correção 08.09, dois bugs da operadora LARISSA). Nenhum dos dois foi diagnosticado por leitura de código: os dois foram MEDIDOS. (a) O bloqueio do PDF no 33+44 não era falha de conversão — renderizei as páginas com PDFium e OLHEI: as páginas reprovadas a 1,37% e 1,23% estavam legíveis (documento de transporte com placa manuscrita; ficha de agendamento). O piso de 2% de tinta estava reprovando conversão boa, e uma página reprovada derrubava o PDF inteiro — a página 1, a 6,41%, ia pro lixo junto. De quebra descobriu-se que a telemetria `ConversaoPdfBloqueadaGuard` do front NUNCA gravou: o `actor_id` era a string `"front-conversao-pdf"` e a RLS `card_events_insert_operator` exige `actor_id = current_operador_id()`, então todo insert era recusado e engolido pelo `catch`. Os 2 únicos eventos do banco vinham do servidor. A ADR 0014 mandava contar bloqueios por 2–4 semanas pra decidir o conversor server-side, e o contador estava cego desde o começo — por isso o bug chegou por reclamação de operadora, não por métrica. (b) A NF 1037746 não entrou nas pendências porque a oc 13 está fora do escopo e o pagador não estava na exceção: o sistema seguiu a regra, a regra é que estava errada pro cliente. Ao preparar o fix apareceu a armadilha que virou o INV-148: a tabela da exceção era um interruptor só pra "aparecer" e pra "robô agir", então corrigir a visibilidade ligaria um agente que lança oc 21 e cancela reentrega sem autorização do cliente — o oposto da regra do negócio. REGRA INVIOLÁVEL: sinal fraco de qualidade (pouca tinta) pede olho humano, nunca reprova sozinho; e visibilidade nunca liga autonomia.

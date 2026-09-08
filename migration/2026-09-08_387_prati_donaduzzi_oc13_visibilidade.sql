@@ -1,0 +1,84 @@
+-- =============================================================================
+-- 2026-09-08_387 — PRATI DONADUZZI entra na oc 13: VISIBILIDADE, sem robô
+-- =============================================================================
+-- Correção 08.09 (Carlos). ADR 0026. Roda DEPOIS das migs 385 e 386.
+--
+-- CASO ÂNCORA — NF 1037746 / CTRC PRT562381-2:
+--   oc 13 ("ENDERECO NAO ENCONTRADO (SSWMOBILE)") lançada em 28/08 às 15:36 na
+--   filial BHE. A NF NUNCA apareceu na fila da Larissa e a tratativa só andou
+--   porque o CLIENTE cobrou retorno.
+--
+-- EVIDÊNCIA VERIFICADA EM 08/09 (não é suposição):
+--   • Cockpit: ZERO cards com essa NF ou CTRC (busquei pelos dois). O card
+--     nunca existiu — não era problema de busca nem de visibilidade.
+--   • Bastão: a pendência existe e está completa —
+--       nf 1037746 | ctrc PRT562381-2 | oc 13 | data 28/08
+--       cnpj_pagador 73856593001057 | pagador "PRATI DONADUZZI A3"
+--       responsavel_atual "operacao" | responsavel_relacionamento "LARISSA"
+--       segmento "018 - INDUSTRIA FARMACEUTICA"
+--   • Carteira: os dois CNPJs da Prati estão na carteira da LARISSA, e o
+--     segmento 018 também é dela.
+--   • Motivo real de não entrar: oc 13 não é de Relacionamento no dicionário
+--     (é Operação, ADR 0004) e o CNPJ não estava em cliente_config_oc13 —
+--     então a NF não passa nem pela 1ª query (filtra por oc do dicionário) nem
+--     pela 2ª (oc 13 restrita aos CNPJs da exceção) do
+--     fetchPendenciasDoCockpit. O sistema fez exatamente o que a regra manda;
+--     a regra é que estava errada pra este cliente.
+--   • Histórico: a Prati JÁ teve 14 cards com oc 13, todos da Larissa, todos
+--     terminando em TRANSFERIDO — entravam por outra porta (mensagem do
+--     cliente / card preexistente) e o sistema os empurrava fora do escopo.
+--     É exatamente o sintoma que ela relatou.
+--
+-- PREMISSA DO NEGÓCIO CONFIRMADA (Carlos, 08/09): a reentrega da Prati **não**
+-- é emitida automaticamente. "O cliente sempre precisa ser notificado antes e
+-- somente com a autorização dele é possível seguir." Logo:
+--   ativo = true           → o card APARECE pra Larissa tratar;
+--   autonomo_ativo = false → o agente-oc13-autonomo NÃO age. Nada de oc 21 +
+--                            cancelamento de reentrega sem falar com o cliente,
+--                            e nada de ação entrando na janela de veto de 60min
+--                            (a Larissa está habilitada no trilho de veto e a
+--                            flag acao_autonoma_veto_enabled está LIGADA — sem
+--                            este false, a inclusão ligaria o robô pra ela).
+--
+-- -----------------------------------------------------------------------------
+-- TIPO B (docs/POLITICA_MIGRATIONS.md) — exige --autorizado-por:
+--   • "INSERT em tabela operacional" (cliente_config_oc13 muda o que o
+--     sync-bastao puxa do Bastão).
+--
+-- ⚠ Blast radius MEDIDO no Bastão em 08/09:
+--     cnpj 73856593001057 → 267 pendências abertas, das quais **1** com oc 13
+--                           (exatamente a NF 1037746 deste caso)
+--     cnpj 73856593000166 → 0 pendências abertas
+--   Ou seja: aplicar isto cria **1 card** no próximo ciclo do sync (5 min), na
+--   fila da Larissa, em AGUARDANDO_VALIDACAO_HUMANA com proposta pronta.
+--   NÃO é o cenário de enxurrada: pôr a oc 13 no dicionário como
+--   Relacionamento faria cair ~120 cards de uma vez em todas as carteiras —
+--   é justamente o que NÃO estamos fazendo aqui.
+--
+-- ⚠ Os dois CNPJs entram porque a regra é do CLIENTE, não do estabelecimento.
+--   O …0166 hoje não tem pendência nenhuma (0 cards agora), mas se um dia
+--   embarcar, cai na mesma regra sem precisar de migration nova.
+--
+-- ⚠ SEM BEGIN/COMMIT interno (política 13/08).
+--
+-- Reversível: DELETE das 2 linhas (ou UPDATE ativo=false, que já tira da
+-- visibilidade sem perder o registro).
+--
+-- skill `supabase-postgres-best-practices`: não instalada nesta sessão. Regras
+-- aplicadas manualmente: idempotente via ON CONFLICT; CNPJ com 14 dígitos
+-- (respeita o CHECK cliente_config_oc13_cnpj_digits); PK é cnpj_pagador;
+-- schema-qualified; RLS intocada.
+-- =============================================================================
+
+INSERT INTO public.cliente_config_oc13 (cnpj_pagador, nome_cliente, ativo, autonomo_ativo, observacao)
+VALUES
+  ('73856593001057', 'PRATI DONADUZZI A3', true, false,
+   'Correcao 08.09 (ADR 0026). Caso ancora NF 1037746 / CTRC PRT562381-2, oc 13 de 28/08 que nunca chegou na fila da Larissa. Reentrega NAO e automatica: cliente precisa ser notificado e autorizar antes. Robo DESLIGADO de proposito.'),
+  ('73856593000166', 'PRATI DONADUZZI E CIA LTDA', true, false,
+   'Correcao 08.09 (ADR 0026). Mesmo grupo do 73856593001057 — a regra e do cliente, nao do estabelecimento. Sem pendencia aberta no Bastao em 08/09. Robo DESLIGADO de proposito.')
+ON CONFLICT (cnpj_pagador) DO NOTHING;
+
+-- Conferência esperada: 17 linhas no total; as 2 da Prati com ativo=t e
+-- autonomo_ativo=f; as 15 antigas com autonomo_ativo=t.
+--   select nome_cliente, cnpj_pagador, ativo, autonomo_ativo
+--     from public.cliente_config_oc13 order by nome_cliente, cnpj_pagador;
