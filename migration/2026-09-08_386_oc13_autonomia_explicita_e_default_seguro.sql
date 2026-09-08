@@ -3,6 +3,16 @@
 -- =============================================================================
 -- Correção 08.09 (Carlos). ADR 0026. Roda DEPOIS da mig 385.
 --
+-- ## ORDEM E AUTORIZACAO
+--
+-- Carlos, 08/09, literal no chat: "entendi, siga com as tres etapas,
+-- autorizado. no final, se estiver tudo 100%, autorizado a apagar a brench
+-- criada." Autorizacao dada apos explicacao previa, no mesmo chat, do que cada
+-- uma das 3 etapas faz e do blast radius de cada uma.
+-- Autonomia: docs/POLITICA_MIGRATIONS.md, TIPO B, revisao 02/09 = "o Caio ou o
+-- Carlos" autorizam, com a autorizacao DECLARADA aqui, no --autorizado-por e
+-- no commit.
+--
 -- O que faz, e só isso:
 --   1. Carimba autonomo_ativo = true nas linhas que estão NULL (as 15 de hoje).
 --      NULL já era lido como "agente age" pelo agente-oc13-autonomo, então isto
