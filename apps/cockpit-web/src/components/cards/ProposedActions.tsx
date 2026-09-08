@@ -25,6 +25,8 @@ import { relativeTime } from "@/lib/format";
 import {
   avaliarPaginaConvertida,
   mensagemConversaoQuebrada,
+  mensagemPaginaSuspeita,
+  politicaDaPagina,
   RE_WARNING_PDFJS_IMG,
 } from "@/lib/pdfConversaoGuard";
 
@@ -3590,11 +3592,34 @@ function isPdfMime(mime: string | null | undefined): boolean {
   return mime === "application/pdf";
 }
 
+/**
+ * Uma página já convertida em JPEG (correção 08.09).
+ *
+ * `suspeita` = o guard reprovou por POUCA TINTA na faixa que pede olho humano
+ * (0,5%–2%). A página vem junto, com prévia, pro operador decidir — antes a
+ * conversão inteira era abortada e até as páginas boas iam pro lixo.
+ */
+interface PaginaConvertida {
+  pdfFilename: string;
+  pagina: number;
+  file: File;
+  suspeita: boolean;
+  fracaoNaoBranca: number;
+  /** dataURL da miniatura — só nas páginas suspeitas (as boas não precisam). */
+  previewUrl: string | null;
+}
+
+/** Chave estável da decisão do operador sobre uma página. */
+function chavePagina(p: { pdfFilename: string; pagina: number }): string {
+  return `${p.pdfFilename}#${p.pagina}`;
+}
+
 async function convertPdfBlobToJpegFiles(
   pdfBlob: Blob,
   baseName: string,
   cardId?: string,
-): Promise<File[]> {
+  operadorId?: string | null,
+): Promise<PaginaConvertida[]> {
   // Use legacy build — modern build uses Uint8Array.prototype.toHex() (ES Stage 3),
   // unavailable in Chrome <140 / Safari <18.4 / Firefox <139. Legacy ships a polyfill.
   const pdfjsLib: any = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -3610,7 +3635,7 @@ async function convertPdfBlobToJpegFiles(
   // pdfjs-wasm-sync garante espelho byte-a-byte com o pacote instalado.
   const wasmUrl = new URL("/pdfjs-wasm/", window.location.origin).href;
   const pdf = await pdfjsLib.getDocument({ data: arrayBuf, wasmUrl }).promise;
-  const out: File[] = [];
+  const out: PaginaConvertida[] = [];
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const viewport = page.getViewport({ scale: 2.5 });
@@ -3643,34 +3668,262 @@ async function convertPdfBlobToJpegFiles(
       ctx.getImageData(0, 0, canvas.width, canvas.height).data,
       warningPdfjs,
     );
+    const politica = veredito.quebrada && veredito.motivo
+      ? politicaDaPagina(veredito.motivo, veredito.fracaoNaoBranca)
+      : null;
+
     if (veredito.quebrada && veredito.motivo) {
-      // Telemetria best-effort (decide o fix 1b — conversão server-side): não
-      // pode derrubar o fluxo se o insert falhar.
-      if (cardId) {
+      // Telemetria best-effort. Correção 08.09: o actor_id era a string
+      // "front-conversao-pdf", mas a política RLS card_events_insert_operator
+      // exige actor_id = current_operador_id() — TODO insert do front era
+      // recusado e engolido pelo catch. Resultado: 2 eventos no banco, os dois
+      // do servidor, ZERO do front. A ADR 0014 mandava contar bloqueios pra
+      // decidir o conversor server-side e o contador nunca funcionou.
+      if (cardId && operadorId) {
         try {
           await supabase.from("card_events").insert({
             card_id: cardId,
             event_type: "ConversaoPdfBloqueadaGuard",
             actor_type: "operator",
-            actor_id: "front-conversao-pdf",
+            actor_id: operadorId,
             payload: {
+              origem: "front-conversao-pdf",
               filename: baseName,
               pagina: i,
               motivo: veredito.motivo,
+              politica,
               fracao_nao_branca: Number(veredito.fracaoNaoBranca.toFixed(4)),
             },
           });
         } catch { /* telemetria nunca bloqueia */ }
       }
-      throw new Error(mensagemConversaoQuebrada(baseName, i, veredito.motivo));
     }
+
+    // Bloqueio duro: decodificador desistiu, ou folha praticamente sem tinta.
+    // Só aqui a conversão do arquivo falha inteira — como antes.
+    if (politica === "bloquear") {
+      throw new Error(
+        mensagemConversaoQuebrada(baseName, i, veredito.motivo!, veredito.fracaoNaoBranca),
+      );
+    }
+
     const blob: Blob = await new Promise((resolve) =>
       canvas.toBlob((b) => resolve(b!), "image/jpeg", 0.92),
     );
     const safeBase = baseName.replace(/\.pdf$/i, "").replace(/[^\w.-]+/g, "_");
-    out.push(new File([blob], `${safeBase}_p${i}.jpg`, { type: "image/jpeg" }));
+    out.push({
+      pdfFilename: baseName,
+      pagina: i,
+      file: new File([blob], `${safeBase}_p${i}.jpg`, { type: "image/jpeg" }),
+      suspeita: politica === "confirmar",
+      fracaoNaoBranca: veredito.fracaoNaoBranca,
+      // Miniatura só da página que o operador precisa olhar (0,4 de qualidade
+      // e meia escala: é pra bater o olho, não pra arquivar).
+      previewUrl: politica === "confirmar" ? miniaturaDoCanvas(canvas) : null,
+    });
   }
   return out;
+}
+
+type ResultadoConversaoPdfs =
+  | { tipo: "erro" }
+  | { tipo: "revisar"; pendentes: PaginaConvertida[] }
+  | { tipo: "ok"; aprovadas: PaginaConvertida[] };
+
+/**
+ * Baixa e converte TODOS os PDFs selecionados ANTES de subir qualquer página
+ * (correção 08.09). A ordem importa: se a pausa pra perguntar acontecesse no
+ * meio do upload, as páginas do PDF anterior já teriam subido e o reenvio
+ * duplicaria anexo no card. Aqui nada sobe até toda página ter decisão.
+ *
+ * `decisoes` é o que o operador já respondeu no painel de revisão
+ * (chavePagina → incluir?). Página suspeita sem resposta volta em `pendentes`.
+ *
+ * `cache` evita reconverter no segundo clique (o do painel): a conversão é
+ * determinística e client-side, então reaproveitar é seguro e poupa o
+ * re-download do storage.
+ */
+async function converterPdfsSelecionados(args: {
+  pdfs: InboundAnexoOpt[];
+  cardId: string;
+  operadorId: string | null;
+  decisoes: Record<string, boolean>;
+  cache: Map<string, PaginaConvertida[]>;
+  setStatus: (s: string) => void;
+}): Promise<ResultadoConversaoPdfs> {
+  const { pdfs, cardId, operadorId, decisoes, cache, setStatus } = args;
+  const todas: PaginaConvertida[] = [];
+
+  for (const pdf of pdfs) {
+    const doCache = cache.get(pdf.id);
+    if (doCache) {
+      todas.push(...doCache);
+      continue;
+    }
+
+    // (a) baixar
+    let blob: Blob;
+    try {
+      setStatus(`Baixando ${pdf.filename}...`);
+      const { data: signed, error: signErr } = await supabase!.storage
+        .from("email_anexos")
+        .createSignedUrl(pdf.storage_path, 60);
+      if (signErr || !signed?.signedUrl) {
+        throw new Error(signErr?.message ?? "url inválida");
+      }
+      const resp = await fetch(signed.signedUrl);
+      blob = await resp.blob();
+    } catch (err) {
+      toast.error(`Não consegui baixar "${pdf.filename}"`, {
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return { tipo: "erro" };
+    }
+
+    // (b) converter (pdf.js no browser)
+    try {
+      setStatus(`Convertendo ${pdf.filename} em JPEGs...`);
+      const paginas = await convertPdfBlobToJpegFiles(blob, pdf.filename, cardId, operadorId);
+      cache.set(pdf.id, paginas);
+      todas.push(...paginas);
+    } catch (err) {
+      toast.error(`Falha ao converter "${pdf.filename}" em imagem`, {
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return { tipo: "erro" };
+    }
+  }
+
+  const pendentes = todas.filter(
+    (p) => p.suspeita && decisoes[chavePagina(p)] === undefined,
+  );
+  if (pendentes.length > 0) return { tipo: "revisar", pendentes };
+
+  // Suspeita que o operador desmarcou não sobe; o resto vai.
+  const aprovadas = todas.filter((p) => !p.suspeita || decisoes[chavePagina(p)] === true);
+  return { tipo: "ok", aprovadas };
+}
+
+/**
+ * Painel de revisão das páginas com pouca tinta (correção 08.09, INV-147).
+ * O operador VÊ a página e decide — em vez de o sistema reprovar sozinho e
+ * mandar "tire um print", que era o comportamento antigo mesmo quando o
+ * documento estava perfeitamente legível.
+ */
+function PainelPaginasSuspeitas({
+  pendentes,
+  decisoes,
+  onToggle,
+  onCancelar,
+  onContinuar,
+  ocupado,
+}: {
+  pendentes: PaginaConvertida[];
+  decisoes: Record<string, boolean>;
+  onToggle: (chave: string) => void;
+  onCancelar: () => void;
+  onContinuar: () => void;
+  ocupado: boolean;
+}) {
+  const marcadas = pendentes.filter((p) => decisoes[chavePagina(p)] === true).length;
+  return (
+    <div className="mb-4 border-2 border-sal bg-sal/5 p-3">
+      <div className="mb-1 flex items-center gap-2">
+        <AlertTriangle className="h-4 w-4 shrink-0 text-sal" />
+        <h3 className="font-display text-[14px] font-semibold text-ink">
+          Confira {pendentes.length === 1 ? "esta página" : "estas páginas"} antes de anexar
+        </h3>
+      </div>
+      <p className="mb-3 font-mono text-[11px] leading-snug text-ink/70">
+        Saíram com pouca tinta na conversão. Isso é comum em romaneio e minuta
+        deitados — e quase sempre está tudo certo. Desmarque só o que estiver
+        ilegível ou em branco.
+      </p>
+      <ul className="space-y-2">
+        {pendentes.map((p) => {
+          const chave = chavePagina(p);
+          const incluir = decisoes[chave] === true;
+          return (
+            <li key={chave} className="flex gap-3 border border-ink/20 bg-paper p-2">
+              {p.previewUrl ? (
+                <a href={p.previewUrl} target="_blank" rel="noreferrer" className="shrink-0">
+                  <img
+                    src={p.previewUrl}
+                    alt={`Prévia da página ${p.pagina} de ${p.pdfFilename}`}
+                    className="h-28 w-auto border border-ink/20 bg-white object-contain"
+                  />
+                </a>
+              ) : (
+                <div className="flex h-28 w-20 shrink-0 items-center justify-center border border-ink/20 font-mono text-[10px] text-ink/50">
+                  sem prévia
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-mono text-[11px] font-semibold text-ink">
+                  {p.pdfFilename}
+                </p>
+                <p className="mt-0.5 font-mono text-[10px] leading-snug text-ink/60">
+                  {mensagemPaginaSuspeita(p.pagina, p.fracaoNaoBranca)}
+                </p>
+                {p.previewUrl && (
+                  <p className="mt-0.5 font-mono text-[10px] text-ink/40">
+                    Clique na miniatura pra abrir em tamanho real.
+                  </p>
+                )}
+                <label className="mt-1.5 flex cursor-pointer items-center gap-2 font-mono text-[11px] text-ink">
+                  <input
+                    type="checkbox"
+                    checked={incluir}
+                    onChange={() => onToggle(chave)}
+                    className="h-3.5 w-3.5 accent-sal"
+                  />
+                  Anexar esta página
+                </label>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="mt-3 flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancelar}
+          disabled={ocupado}
+          className="border border-ink px-3 py-1.5 font-mono text-[11px] uppercase text-ink disabled:opacity-50"
+        >
+          Voltar
+        </button>
+        <button
+          type="button"
+          onClick={onContinuar}
+          disabled={ocupado}
+          className="border-2 border-sal bg-sal px-3 py-1.5 font-mono text-[11px] font-semibold uppercase text-paper disabled:opacity-50"
+        >
+          {marcadas === 0
+            ? "Continuar sem estas páginas"
+            : `Anexar ${marcadas} e continuar`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Miniatura leve pro painel de revisão — não vai pro SSW, é só pra olhar. */
+function miniaturaDoCanvas(canvas: HTMLCanvasElement): string | null {
+  try {
+    const alvo = document.createElement("canvas");
+    const escala = Math.min(1, 700 / Math.max(canvas.width, canvas.height));
+    alvo.width = Math.max(1, Math.round(canvas.width * escala));
+    alvo.height = Math.max(1, Math.round(canvas.height * escala));
+    const ctx = alvo.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, alvo.width, alvo.height);
+    ctx.drawImage(canvas, 0, 0, alvo.width, alvo.height);
+    return alvo.toDataURL("image/jpeg", 0.6);
+  } catch {
+    return null; // sem prévia o painel ainda funciona (mostra só a medida)
+  }
 }
 
 /**
@@ -3893,6 +4146,12 @@ function ModalCombo3344({
   const [motivo, setMotivo] = useState("");
   const [filial, setFilial] = useState("");
 
+  // Revisão de páginas com pouca tinta (correção 08.09, INV-147).
+  const { operador } = useAuth();
+  const [paginasEmRevisao, setPaginasEmRevisao] = useState<PaginaConvertida[] | null>(null);
+  const [decisoesPaginas, setDecisoesPaginas] = useState<Record<string, boolean>>({});
+  const cacheConversaoRef = useRef(new Map<string, PaginaConvertida[]>());
+
   // Carregar anexos inbound do card
   const { data: anexosInbound = [] } = useQuery({
     queryKey: ["anexos-inbound-combo", card.id],
@@ -3976,60 +4235,58 @@ function ModalCombo3344({
       finalIds.push(a.anexo_id);
     }
 
-    // Conversão + upload dos PDFs (etapas separadas: erro de conversão ≠ erro de upload)
+    // Conversão dos PDFs (correção 08.09): converte TODOS antes de subir
+    // qualquer página. Página com pouca tinta pausa o fluxo aqui e vai pro
+    // painel de revisão — nada sobe até toda página ter decisão, e é por isso
+    // que reenviar depois de revisar não duplica anexo no card.
     if (pdfsParaConverter.length > 0) {
       setConvertendo(true);
-      for (const pdf of pdfsParaConverter) {
-        // (a) baixar
-        let blob: Blob;
-        try {
-          setStatusConv(`Baixando ${pdf.filename}...`);
-          const { data: signed, error: signErr } = await supabase!.storage
-            .from("email_anexos")
-            .createSignedUrl(pdf.storage_path, 60);
-          if (signErr || !signed?.signedUrl) {
-            throw new Error(signErr?.message ?? "url inválida");
+      const res = await converterPdfsSelecionados({
+        pdfs: pdfsParaConverter,
+        cardId: card.id,
+        operadorId: operador?.id ?? null,
+        decisoes: decisoesPaginas,
+        cache: cacheConversaoRef.current,
+        setStatus: setStatusConv,
+      });
+      if (res.tipo === "erro") {
+        setConvertendo(false);
+        setStatusConv("");
+        return;
+      }
+      if (res.tipo === "revisar") {
+        setConvertendo(false);
+        setStatusConv("");
+        // Pré-marca INCLUIR: falso positivo é a regra, não a exceção (2 de 2
+        // bloqueios registrados eram página legível). O operador desmarca o
+        // que de fato não serve.
+        setDecisoesPaginas((prev) => {
+          const next = { ...prev };
+          for (const p of res.pendentes) {
+            if (next[chavePagina(p)] === undefined) next[chavePagina(p)] = true;
           }
-          const resp = await fetch(signed.signedUrl);
-          blob = await resp.blob();
+          return next;
+        });
+        setPaginasEmRevisao(res.pendentes);
+        return;
+      }
+      setPaginasEmRevisao(null);
+
+      // Upload só das páginas aprovadas (mensagem REAL do backend no erro)
+      for (let i = 0; i < res.aprovadas.length; i++) {
+        const pg = res.aprovadas[i]!;
+        try {
+          setStatusConv(`Subindo ${pg.file.name} (${i + 1}/${res.aprovadas.length})...`);
+          const up = await uploadFileAsAnexo(pg.file, card.id, todo.id);
+          finalIds.push(up.anexo_id);
+          finalNomes.push(pg.file.name);
         } catch (err) {
-          toast.error(`Não consegui baixar "${pdf.filename}"`, {
+          toast.error(`Não foi possível anexar "${pg.file.name}"`, {
             description: err instanceof Error ? err.message : String(err),
           });
           setConvertendo(false);
           setStatusConv("");
           return;
-        }
-
-        // (b) converter (pdf.js no browser)
-        let jpegs: File[];
-        try {
-          setStatusConv(`Convertendo ${pdf.filename} em JPEGs...`);
-          jpegs = await convertPdfBlobToJpegFiles(blob, pdf.filename, card.id);
-        } catch (err) {
-          toast.error(`Falha ao converter "${pdf.filename}" em imagem`, {
-            description: err instanceof Error ? err.message : String(err),
-          });
-          setConvertendo(false);
-          setStatusConv("");
-          return;
-        }
-
-        // (c) upload de cada página (mensagem REAL do backend em caso de erro)
-        for (let i = 0; i < jpegs.length; i++) {
-          try {
-            setStatusConv(`Subindo ${pdf.filename} pág ${i + 1}/${jpegs.length}...`);
-            const up = await uploadFileAsAnexo(jpegs[i], card.id, todo.id);
-            finalIds.push(up.anexo_id);
-            finalNomes.push(jpegs[i]!.name);
-          } catch (err) {
-            toast.error(`Não foi possível anexar "${jpegs[i].name}"`, {
-              description: err instanceof Error ? err.message : String(err),
-            });
-            setConvertendo(false);
-            setStatusConv("");
-            return;
-          }
         }
       }
       setConvertendo(false);
@@ -4255,6 +4512,27 @@ function ModalCombo3344({
           </div>
         )}
 
+        {paginasEmRevisao && paginasEmRevisao.length > 0 && (
+          <PainelPaginasSuspeitas
+            pendentes={paginasEmRevisao}
+            decisoes={decisoesPaginas}
+            onToggle={(chave) =>
+              setDecisoesPaginas((prev) => ({ ...prev, [chave]: !prev[chave] }))
+            }
+            onCancelar={() => {
+              // Volta pra seleção: esquece as decisões pra o operador poder
+              // trocar de anexo e ser perguntado de novo.
+              setPaginasEmRevisao(null);
+              setDecisoesPaginas({});
+            }}
+            onContinuar={() => {
+              setPaginasEmRevisao(null);
+              void handleConfirmar();
+            }}
+            ocupado={submitting || uploading || convertendo}
+          />
+        )}
+
         <div className="flex justify-end gap-2 border-t border-ink/15 pt-3">
           <button
             onClick={onClose}
@@ -4265,7 +4543,7 @@ function ModalCombo3344({
           </button>
           <button
             onClick={handleConfirmar}
-            disabled={submitting || uploading || convertendo}
+            disabled={submitting || uploading || convertendo || !!paginasEmRevisao}
             className="bg-sal px-4 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-paper hover:bg-ink disabled:opacity-40"
           >
             {submitting
@@ -4306,6 +4584,12 @@ function ModalOc33Solo({
   const [uploading, setUploading] = useState(false);
   const [convertendo, setConvertendo] = useState(false);
   const [statusConv, setStatusConv] = useState<string>("");
+
+  // Revisão de páginas com pouca tinta (correção 08.09, INV-147).
+  const { operador } = useAuth();
+  const [paginasEmRevisao, setPaginasEmRevisao] = useState<PaginaConvertida[] | null>(null);
+  const [decisoesPaginas, setDecisoesPaginas] = useState<Record<string, boolean>>({});
+  const cacheConversaoRef = useRef(new Map<string, PaginaConvertida[]>());
 
   const { data: anexosInbound = [] } = useQuery({
     queryKey: ["anexos-inbound-oc33solo", card.id],
@@ -4381,59 +4665,53 @@ function ModalOc33Solo({
       finalNomes.push(a.filename);
     }
 
+    // Correção 08.09: mesma mecânica do modal 33+44 — converte tudo antes de
+    // subir qualquer coisa, e página com pouca tinta vai pro painel de revisão
+    // em vez de derrubar o PDF inteiro.
     if (pdfsParaConverter.length > 0) {
       setConvertendo(true);
-      for (const pdf of pdfsParaConverter) {
-        // (a) baixar
-        let blob: Blob;
-        try {
-          setStatusConv(`Baixando ${pdf.filename}...`);
-          const { data: signed, error: signErr } = await supabase!.storage
-            .from("email_anexos")
-            .createSignedUrl(pdf.storage_path, 60);
-          if (signErr || !signed?.signedUrl) {
-            throw new Error(signErr?.message ?? "url inválida");
+      const res = await converterPdfsSelecionados({
+        pdfs: pdfsParaConverter,
+        cardId: card.id,
+        operadorId: operador?.id ?? null,
+        decisoes: decisoesPaginas,
+        cache: cacheConversaoRef.current,
+        setStatus: setStatusConv,
+      });
+      if (res.tipo === "erro") {
+        setConvertendo(false);
+        setStatusConv("");
+        return;
+      }
+      if (res.tipo === "revisar") {
+        setConvertendo(false);
+        setStatusConv("");
+        setDecisoesPaginas((prev) => {
+          const next = { ...prev };
+          for (const p of res.pendentes) {
+            if (next[chavePagina(p)] === undefined) next[chavePagina(p)] = true;
           }
-          const resp = await fetch(signed.signedUrl);
-          blob = await resp.blob();
+          return next;
+        });
+        setPaginasEmRevisao(res.pendentes);
+        return;
+      }
+      setPaginasEmRevisao(null);
+
+      for (let i = 0; i < res.aprovadas.length; i++) {
+        const pg = res.aprovadas[i]!;
+        try {
+          setStatusConv(`Subindo ${pg.file.name} (${i + 1}/${res.aprovadas.length})...`);
+          const up = await uploadFileAsAnexo(pg.file, card.id, todo.id);
+          finalIds.push(up.anexo_id);
+          finalNomes.push(pg.file.name);
         } catch (err) {
-          toast.error(`Não consegui baixar "${pdf.filename}"`, {
+          toast.error(`Não foi possível anexar "${pg.file.name}"`, {
             description: err instanceof Error ? err.message : String(err),
           });
           setConvertendo(false);
           setStatusConv("");
           return;
-        }
-
-        // (b) converter (pdf.js no browser)
-        let jpegs: File[];
-        try {
-          setStatusConv(`Convertendo ${pdf.filename} em JPEGs...`);
-          jpegs = await convertPdfBlobToJpegFiles(blob, pdf.filename, card.id);
-        } catch (err) {
-          toast.error(`Falha ao converter "${pdf.filename}" em imagem`, {
-            description: err instanceof Error ? err.message : String(err),
-          });
-          setConvertendo(false);
-          setStatusConv("");
-          return;
-        }
-
-        // (c) upload de cada página (mensagem REAL do backend em caso de erro)
-        for (let i = 0; i < jpegs.length; i++) {
-          try {
-            setStatusConv(`Subindo ${pdf.filename} pág ${i + 1}/${jpegs.length}...`);
-            const up = await uploadFileAsAnexo(jpegs[i], card.id, todo.id);
-            finalIds.push(up.anexo_id);
-            finalNomes.push(jpegs[i]!.name);
-          } catch (err) {
-            toast.error(`Não foi possível anexar "${jpegs[i].name}"`, {
-              description: err instanceof Error ? err.message : String(err),
-            });
-            setConvertendo(false);
-            setStatusConv("");
-            return;
-          }
         }
       }
       setConvertendo(false);
@@ -4601,6 +4879,25 @@ function ModalOc33Solo({
           </div>
         )}
 
+        {paginasEmRevisao && paginasEmRevisao.length > 0 && (
+          <PainelPaginasSuspeitas
+            pendentes={paginasEmRevisao}
+            decisoes={decisoesPaginas}
+            onToggle={(chave) =>
+              setDecisoesPaginas((prev) => ({ ...prev, [chave]: !prev[chave] }))
+            }
+            onCancelar={() => {
+              setPaginasEmRevisao(null);
+              setDecisoesPaginas({});
+            }}
+            onContinuar={() => {
+              setPaginasEmRevisao(null);
+              void handleConfirmar();
+            }}
+            ocupado={submitting || uploading || convertendo}
+          />
+        )}
+
         <div className="flex justify-end gap-2 border-t border-ink/15 pt-3">
           <button
             onClick={onClose}
@@ -4611,7 +4908,7 @@ function ModalOc33Solo({
           </button>
           <button
             onClick={handleConfirmar}
-            disabled={submitting || uploading || convertendo}
+            disabled={submitting || uploading || convertendo || !!paginasEmRevisao}
             className="bg-sal px-4 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-paper hover:bg-ink disabled:opacity-40"
           >
             {submitting
