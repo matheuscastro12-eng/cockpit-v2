@@ -2,6 +2,12 @@
 // agente-oc13-autonomo — orquestrador IA pra cards oc=13 de clientes exceção
 // (cliente_config_oc13). Cron 5min. Caio 2026-05-22.
 //
+// Correção 08.09 (migs 385/386, ADR 0026, INV-148): este agente é governado por
+// `cliente_config_oc13.autonomo_ativo`, NÃO por `ativo`. `ativo` só decide se o
+// card APARECE pro operador (isso é do sync-bastao). Cliente pode estar visível
+// e com o robô desligado — é o padrão pra quem exige ser notificado e autorizar
+// antes de qualquer ação (regra Carlos 08/09, caso PRATI DONADUZZI).
+//
 // Árvore de decisão:
 // 1. Fora 8h-18h BRT seg-sex + instrução "LOCAL FECHADO" → autônomo oc=21 + cancel
 // 2. Sem foto → autônomo oc=21 + cancel
@@ -96,16 +102,60 @@ Deno.serve(async (req) => {
   const limiteCriacao = new Date(Date.now() - CRIADO_HA_NO_MAX_HORAS * 60 * 60 * 1000).toISOString();
   const limiteRetry = new Date(Date.now() - RETRY_INTERVAL_MIN * 60 * 1000).toISOString();
 
-  // CNPJs exceção
-  const { data: excecaoRows, error: excErr } = await supabase
-    .from("cliente_config_oc13")
-    .select("cnpj_pagador")
-    .eq("ativo", true);
-  if (excErr) return json({ ok: false, error: `cliente_config_oc13: ${excErr.message}` }, 500);
-  const cnpjsExcecao = new Set((excecaoRows ?? []).map((r) => r.cnpj_pagador as string));
+  // CNPJs exceção da oc 13.
+  //
+  // Correção 08.09 (migs 385/386, ADR 0026): `cliente_config_oc13` deixou de
+  // ser UM interruptor pra duas coisas. Agora:
+  //   `ativo`          = VISIBILIDADE — o sync-bastao puxa a pendência e o card
+  //                      nasce na fila do operador. NÃO é lido aqui.
+  //   `autonomo_ativo` = AUTONOMIA  — se ESTE agente pode agir (lançar oc 21 +
+  //                      cancelar reentrega via auto_aprovar_e_executar, ou
+  //                      agendar a ação destacada na janela de veto).
+  //
+  // Este agente é a AUTONOMIA. Cliente com ativo=true e autonomo_ativo=false
+  // aparece pro operador e NÃO é tocado aqui — caso da PRATI DONADUZZI, onde a
+  // regra do negócio é que o cliente precisa ser notificado e autorizar antes
+  // (Carlos, 08/09).
+  let excecaoRows: Array<{ cnpj_pagador: string; autonomo_ativo?: boolean | null }>;
+  {
+    const q = await supabase
+      .from("cliente_config_oc13")
+      .select("cnpj_pagador, autonomo_ativo")
+      .eq("ativo", true);
+    if (q.error) {
+      // Tolerância de ORDEM DE DEPLOY: se esta versão subir antes da mig 385,
+      // a coluna não existe (PostgREST 42703). Cai pro comportamento ANTERIOR
+      // com aviso gritado no log, em vez de derrubar o agente e deixar os
+      // clientes de hoje sem tratativa. Some sozinho quando a 385 é aplicada.
+      if (!/autonomo_ativo/i.test(q.error.message)) {
+        return json({ ok: false, error: `cliente_config_oc13: ${q.error.message}` }, 500);
+      }
+      console.warn(
+        "[agente-oc13] ⚠ coluna autonomo_ativo AUSENTE — migs 385/386 não aplicadas. " +
+          "Rodando no comportamento antigo (todo CNPJ ativo é autônomo). Aplicar as migrations.",
+      );
+      const fb = await supabase
+        .from("cliente_config_oc13")
+        .select("cnpj_pagador")
+        .eq("ativo", true);
+      if (fb.error) return json({ ok: false, error: `cliente_config_oc13: ${fb.error.message}` }, 500);
+      excecaoRows = (fb.data ?? []) as Array<{ cnpj_pagador: string }>;
+    } else {
+      excecaoRows = (q.data ?? []) as Array<{ cnpj_pagador: string; autonomo_ativo?: boolean | null }>;
+    }
+  }
+
+  // NULL = como era antes da mig 385 (age). Só `false` proíbe — e proíbe de
+  // verdade: sem entrar neste Set, o card não é nem lido por este agente.
+  const cnpjsExcecao = new Set(
+    excecaoRows.filter((r) => r.autonomo_ativo !== false).map((r) => r.cnpj_pagador),
+  );
 
   if (cnpjsExcecao.size === 0) {
-    return json({ ok: true, processados: 0, motivo: "cliente_config_oc13 vazio" }, 200);
+    return json(
+      { ok: true, processados: 0, motivo: "nenhum CNPJ com autonomia da oc 13 ligada" },
+      200,
+    );
   }
 
   const { data: candidatos, error: selErr } = await supabase
