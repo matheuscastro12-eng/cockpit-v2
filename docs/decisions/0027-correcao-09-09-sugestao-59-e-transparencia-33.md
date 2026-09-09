@@ -194,3 +194,76 @@ Os 2 failures do backend são os mesmos de antes da correção
 * **A janela em que a 33 pode ter faltado de verdade:** a NF 350882 ficou de
   07/08 a 19/08 sem 33 ativa. Não consegui reconstruir o que estava na tela nesse
   intervalo — fica como hipótese não confirmada.
+
+## Registro de deploy — 2026-09-09 (APLICADO E PROVADO)
+
+Autorizado pelo Carlos em 2026-09-09 ("autorizado, garanta que a master, git,
+supabase e deploy estejam 100% alinhados"). Merge `f701cc2`, master = origin.
+
+### Edge functions
+
+Fecho transitivo do `_shared/propostas-pos-resposta-cliente.ts`:
+`cron-ia-resposta-pendentes`, `scan-email-pre-card`, `vinculador`.
+
+Conferi o fecho POR FORA do script antes de deployar, porque `executor/index.ts`
+também casa no grep. Dos 8 hits da string no repo, só 4 são `import`; os outros
+4 são **comentário** (`executor:3923`, `destaque-resposta-cliente:18`,
+`devolucao-cte-44:30`, `extravio-parcial-dossie:492`). O único intermediário real
+é `_shared/acionar-resposta-cliente.ts:28`, importado pelas mesmas 3 funções. O
+`deploy_pendente.py` estava certo e o `executor` **não** entra.
+
+| | pré | pós |
+|---|---|---|
+| cron-ia-resposta-pendentes | v40 | **v41** ACTIVE 13:05Z |
+| scan-email-pre-card | v40 | **v41** ACTIVE 13:05Z |
+| vinculador | v133 | **v134** ACTIVE 13:05Z |
+
+### Prova direta (não a mensagem do CLI, não a data)
+
+`supabase functions download` das 3 + `cmp` contra `f701cc2`: **39/39 arquivos
+byte-a-byte idênticos**, 0 diferentes, 0 ausentes. No bundle de produção de
+`propostas-pos-resposta-cliente.ts`:
+
+* portão novo presente — `(pendenciaDoc59 && cod === 59 && !ehCombo4459)` na linha 302;
+* portão antigo **ausente** — `(ehExtravioTotal && cod === 59 && !ehCombo4459)` = 0 ocorrências;
+* assimetria preservada — `if (ehExtravioTotal) {` na 328 com
+  `escolher59IndenizacaoParaReviver(todos59Total)` na 329 (revivência segue estreita);
+* query ampliada — `.in("proposta_payload->args->>template_id", [...TEMPLATES_59_PEDIDO_DOCUMENTO])` na 216.
+
+### Prova comportamental em produção
+
+**NF 798761** (fato verificado). Agente classificou `caso_oc49: extravio_sem_qtd`
+→ `ehExtravioTotal` = false, ou seja o portão ANTIGO cancelaria. Resposta do
+cliente interpretada às **13:07:13Z (pós-deploy)** e o 59
+`ENTREGUE_COM_FALTA_PEDIR_ROMANEIO` criado 13:01:42 **segue `pendente`**. No
+mesmo card, um 59 do mesmo template de 24/08 está `cancelado` — o comportamento
+antigo. Mesma NF, mesmo template, antes/depois.
+
+**NF 1846810 NÃO é contra-exemplo** (fato verificado). O 59 dela foi cancelado às
+13:09:35 por `TodosConcorrentesCancelados`, motivo "Operadora escolheu uma das
+opções" — a operadora aprovou acareação, oc 56 lançada 13:10:42 e confirmada pelo
+SSW 13:10:49. Fluxo do menu, não o desta correção.
+
+População protegida hoje: **125 to-dos de 59 parcial em `pendente`**.
+
+Saúde pós-deploy: 406 `card_events` entre 13:00Z e 13:10Z, e os 3 crons das
+funções deployadas com **`succeeded` e zero `failed`** (8 / 20 / 40 execuções).
+
+### Front (Vercel, automático no push)
+
+`https://cockpit-aisalexpress.vercel.app` — `Last-Modified 13:16:54Z`, bundle
+`/assets/index-Dj3J-bT3.js`. Impressões digitais exclusivas do commit `5bcd668`
+presentes: "o SSW reverte a 33 sem isso", "Cobre o cliente ou anexe ao dossiê
+antes de lançar", "no SSW (não envia e-mail)". E o check negativo do bug da NF
+350882: **"Lança só a oc 54 no SSW" ausente** do bundle publicado.
+
+### Banco
+
+**Nada a aplicar.** O merge tem **0 arquivos `.sql`**; última migration do repo
+segue a 389 (08/09). Advisors de segurança: 174 lints, **5 ERROR** — os mesmos 5
+`security_definer_view` pré-existentes, baseline intacto.
+
+### Invariantes na master pós-deploy
+
+INV-062 PASS (test=ok, whitelist=1) · INV-149 PASS (portão novo=1, antigo=0,
+assimetria=1) · INV-150 PASS (10/10 testes de paridade front↔backend).
