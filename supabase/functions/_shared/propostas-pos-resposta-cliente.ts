@@ -89,6 +89,54 @@ export function escolher59IndenizacaoParaReviver(
 }
 
 /**
+ * Templates de oc 59 que representam PEDIDO DE DOCUMENTO ao cliente — os três
+ * `..._PEDIR_ROMANEIO`. Medido no banco em 2026-09-09 (todos os to-dos de oc 59):
+ *   EXTRAVIO_TOTAL_PEDIR_ROMANEIO            5682   (total)
+ *   ENTREGUE_COM_FALTA_PEDIR_ROMANEIO        5279   (parcial, oc 19)
+ *   EXTRAVIO_PARCIAL_DEVOLVER_PEDIR_ROMANEIO  552   (parcial, devolver)
+ *
+ * DE FORA de propósito (são notificação, NÃO pedido de documento — incluí-los
+ * ofereceria 59 onde não há pendência documental):
+ *   EXTRAVIO_PARCIAL 456, RECUSA_TOTAL 22, RECUSA_PARCIAL 13,
+ *   TENTATIVAS_ESGOTADAS 2, e os 7159 sem template (gêmeos sem e-mail).
+ */
+export const TEMPLATES_59_PEDIDO_DOCUMENTO = [
+  TEMPLATE_INDENIZACAO_TOTAL,
+  "ENTREGUE_COM_FALTA_PEDIR_ROMANEIO",
+  "EXTRAVIO_PARCIAL_DEVOLVER_PEDIR_ROMANEIO",
+] as const;
+
+/**
+ * PENDÊNCIA DE DOCUMENTO em aberto (Karol 2026-09-09, NF 75249).
+ *
+ * BUG: no trilho tratativa (âncora≠59) o 59 só sobrevivia ao menu pós-resposta
+ * se o card fosse extravio TOTAL — `ehExtravioTotalPorTodos59` exige o template
+ * EXTRAVIO_TOTAL_PEDIR_ROMANEIO, que só o override de total cria. Num card
+ * PARCIAL (oc 19 = entrega com falta de volumes, template
+ * ENTREGUE_COM_FALTA_PEDIR_ROMANEIO) a regra da oc 19 propunha o 59 e o menu
+ * pós-resposta o cancelava como "obsoleto" minutos depois. Caso âncora medido:
+ * NF 75249, 59 criado 03/09 22:01:31, cancelado 22:07:07 pelo menu.
+ *
+ * Regra do Carlos (09/09): "a existência de uma ocorrência anterior não deve
+ * bloquear uma nova sugestão quando a condição que exige essa ocorrência
+ * continuar ou voltar a existir". O critério certo é PENDÊNCIA DE DOCUMENTO em
+ * aberto — não "é total?".
+ *
+ * ⚠ ESTE SINAL SÓ PRESERVA, NUNCA RESSUSCITA. A revivência de 59 cancelado
+ * segue gated por `ehExtravioTotalPorTodos59` (total), de propósito: alargar a
+ * revivência mexeria em 3307 cards abertos de uma vez e o 59 revivido pode ser
+ * auto-aprovado pela janela de veto (medido: 75 to-dos de 59 com
+ * auto_approval_rule `veto_janela:...:lancar_oc_e_enviar_email:59`) — ou seja,
+ * e-mail ao cliente sem clique do operador. Preservar um pendente que o próprio
+ * sistema acabou de propor não tem esse risco.
+ */
+export function temPendenciaDocumento59(
+  todos59PedidoDoc: ReadonlyArray<{ id: string; status: string }>,
+): boolean {
+  return todos59PedidoDoc.some((t) => t.status === "pendente" || t.status === "aprovado");
+}
+
+/**
  * Quando cliente responde em card AGUARDANDO_CLIENTE, atualiza o conjunto
  * de propostas pendentes pra: [21, 44, 55, 56, 54-relançar, 33-combo, 33-solo].
  *
@@ -162,13 +210,34 @@ export async function atualizarPropostasAposRespostaCliente(
   // seguro. Usado pra manter/reviver o 59+email no trilho tratativa (âncora≠59).
   const { data: todos59Raw } = await supabase
     .from("todos")
-    .select("id, status")
+    .select("id, status, proposta_payload")
     .eq("card_id", cardId)
     .eq("proposta_payload->args->>codigo_ssw", "59")
-    .eq("proposta_payload->args->>template_id", TEMPLATE_INDENIZACAO_TOTAL)
+    .in("proposta_payload->args->>template_id", [...TEMPLATES_59_PEDIDO_DOCUMENTO])
     .order("created_at", { ascending: false });
-  const todos59Total = (todos59Raw ?? []) as Array<{ id: string; status: string }>;
+
+  // Karol 2026-09-09 (NF 75249): a query passou a trazer os TRÊS templates de
+  // pedido de romaneio, mas os dois sinais seguem SEPARADOS de propósito:
+  //   • todos59Total    → só EXTRAVIO_TOTAL_PEDIR_ROMANEIO. Alimenta a
+  //     REVIVÊNCIA (3b), cujo comportamento fica IDÊNTICO ao de antes.
+  //   • todos59PedidoDoc → os três. Alimenta só a PRESERVAÇÃO do 59 pendente
+  //     na whitelist (`ehDaListaNova`), que é o bug do Caso 1.
+  // Se alguém colapsar os dois numa variável só, a revivência passa a mexer em
+  // 3307 cards abertos e pode disparar e-mail via janela de veto. Ver o
+  // docblock de `temPendenciaDocumento59`.
+  const todos59PedidoDoc = (todos59Raw ?? []) as Array<
+    { id: string; status: string; proposta_payload: Record<string, unknown> | null }
+  >;
+  const templateDoTodo = (t: { proposta_payload: Record<string, unknown> | null }): string | null => {
+    const args = t.proposta_payload?.["args"] as Record<string, unknown> | undefined;
+    const tpl = args?.["template_id"];
+    return typeof tpl === "string" ? tpl : null;
+  };
+  const todos59Total = todos59PedidoDoc
+    .filter((t) => templateDoTodo(t) === TEMPLATE_INDENIZACAO_TOTAL)
+    .map((t) => ({ id: t.id, status: t.status }));
   const ehExtravioTotal = ehExtravioTotalPorTodos59(todos59Total);
+  const pendenciaDoc59 = temPendenciaDocumento59(todos59PedidoDoc);
 
   // 2. Carrega todos pendentes existentes
   const { data: pendentes } = await supabase
@@ -224,8 +293,13 @@ export async function atualizarPropostasAposRespostaCliente(
       // card 54/tratativa: menu completo + 59 de indenização SÓ em extravio TOTAL
       // (Larissa 2026-08-05, NF 1102187): mantém o 59+email do override em vez de
       // cancelar como obsoleto. Gate ehExtravioTotal → inerte fora de total.
+      // Karol 2026-09-09 (NF 75249): era `ehExtravioTotal` aqui — o 59 de card
+      // PARCIAL com pedido de romaneio em aberto era cancelado como obsoleto.
+      // `pendenciaDoc59` cobre os três templates de PEDIR_ROMANEIO e é
+      // verdadeiro só quando existe 59 pendente/aprovado (ou seja: só preserva
+      // o que já está lá, nunca cria nem ressuscita).
       : (ehTratativa || ehRelancarCliente || ehIndenizacao33 || ehCombo4459 ||
-        (ehExtravioTotal && cod === 59 && !ehCombo4459));
+        (pendenciaDoc59 && cod === 59 && !ehCombo4459));
 
     if (ehDaListaNova) {
       if (typeof cod === "number") info.ja_existentes.push(cod);

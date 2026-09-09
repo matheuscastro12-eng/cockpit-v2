@@ -1686,8 +1686,19 @@ fi
 # como obsoleto. Gate ehExtravioTotal (presença durável do todo 59+template) →
 # INERTE pra card não-total. Checks: (a) testes puros verdes; (b) whitelist mantém
 # 59 em total; (c) helper de revive presente (def + call).
-INV62_TEST=$(deno test --no-check supabase/functions/_shared/oc59-extravio-total.test.ts >/dev/null 2>&1 && echo ok || echo fail)
-INV62_WL=$(grep -c 'ehExtravioTotal && cod === 59' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
+# ATUALIZADO 2026-09-09 (ADR 0027) — dois ajustes, os dois necessarios:
+#  (1) --allow-read: a suite ganhou o guard de FONTE do INV-149, que LE o
+#      propostas-pos-resposta-cliente.ts. Sem a permissao o deno aborta com
+#      NotCapable e o INV-062 acusaria "menu regrediu" por motivo FALSO — a
+#      mesma armadilha que os comentarios do INV-126 e do INV-133 ja registram.
+#  (2) o grep saiu do NOME do sinal pra ESTRUTURA da whitelist. O portao deixou
+#      de ser "e extravio total?" e passou a ser "tem pendencia de documento?"
+#      (`pendenciaDoc59`), e o total e SUBCONJUNTO disso — logo a garantia deste
+#      INV (o 59 de total sobrevive ao menu) continua valendo. Cobrar o nome
+#      antigo daria FAIL numa mudanca que AMPLIA a protecao. Quem crava QUAL
+#      sinal gateia o que e o INV-149; aqui basta que o 59 siga na whitelist.
+INV62_TEST=$(deno test --no-check --allow-read supabase/functions/_shared/oc59-extravio-total.test.ts >/dev/null 2>&1 && echo ok || echo fail)
+INV62_WL=$(grep -cE '&& cod === 59 && !ehCombo4459' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
 INV62_REVIVE=$(grep -c 'escolher59IndenizacaoParaReviver' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
 if [ "$INV62_TEST" = "ok" ] && [ "${INV62_WL:-0}" -ge 1 ] && [ "${INV62_REVIVE:-0}" -ge 2 ]; then
   echo "INV-062: PASS (test=$INV62_TEST whitelist59=$INV62_WL revive=$INV62_REVIVE)"
@@ -2447,6 +2458,46 @@ if [ "${INV148_AGENTE:-0}" -ge 1 ] && [ "${INV148_FILTRO:-0}" -ge 1 ] && [ "${IN
   echo "INV-148: PASS (agente=$INV148_AGENTE filtro=$INV148_FILTRO sync_limpo=$INV148_SYNC client_limpo=$INV148_CLIENT query_oc13=$INV148_OC13Q test=$INV148_TEST)"
 else
   echo "INV-148: FAIL (agente=$INV148_AGENTE filtro=$INV148_FILTRO sync_limpo=$INV148_SYNC client_limpo=$INV148_CLIENT query_oc13=$INV148_OC13Q test=$INV148_TEST — sync/client precisam ser 0 e o agente precisa do filtro !== false)"
+fi
+
+# INV-149 (Carlos 2026-09-09, ADR 0027): o 59 sobrevive por PENDENCIA DE
+# DOCUMENTO, nao por "e extravio total?". No trilho tratativa o menu
+# pos-resposta cancelava como "obsoleto" o 59 de card PARCIAL, porque o portao
+# exigia o template EXTRAVIO_TOTAL_PEDIR_ROMANEIO (so o override de total cria).
+# Caso ancora NF 75249: 59 criado 03/09 22:01:31, cancelado 22:07:07.
+# A ASSIMETRIA e a regra: preservar usa o sinal LARGO (3 templates), ressuscitar
+# segue no ESTREITO (so total). Colapsar os dois mexeria em 3307 cards abertos e
+# pode disparar e-mail via janela de veto (75 auto-aprovacoes de 59 medidas).
+INV149_SET=$(grep -c 'TEMPLATES_59_PEDIDO_DOCUMENTO' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
+INV149_LARGO=$(grep -c 'pendenciaDoc59 && cod === 59' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
+# o sinal ESTREITO nao pode mais gatear a whitelist (se voltar, o bug volta)
+INV149_VOLTOU=$(grep -c 'ehExtravioTotal && cod === 59' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
+# e a revivencia tem de continuar no sinal estreito
+INV149_REVIVE=$(grep -c 'escolher59IndenizacaoParaReviver(todos59Total)' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
+INV149_TEST=$(deno test --no-check --allow-all supabase/functions/_shared/oc59-extravio-total.test.ts >/dev/null 2>&1 && echo PASS || echo FAIL)
+if [ "${INV149_SET:-0}" -ge 1 ] && [ "${INV149_LARGO:-0}" -ge 1 ] && [ "${INV149_VOLTOU:-1}" -eq 0 ] && [ "${INV149_REVIVE:-0}" -ge 1 ] && [ "$INV149_TEST" = "PASS" ]; then
+  echo "INV-149: PASS (set=$INV149_SET largo=$INV149_LARGO voltou_estreito=$INV149_VOLTOU revive_estreito=$INV149_REVIVE test=$INV149_TEST)"
+else
+  echo "INV-149: FAIL (set=$INV149_SET largo=$INV149_LARGO voltou_estreito=$INV149_VOLTOU revive_estreito=$INV149_REVIVE test=$INV149_TEST — voltou_estreito>0 significa que a whitelist voltou pro portao de TOTAL e o 59 de card parcial volta a ser cancelado; revive_estreito=0 significa que alguem alargou a revivencia)"
+fi
+
+# INV-150 (Carlos 2026-09-09, ADR 0027): a 33 bloqueada DIZ o que falta, e o
+# espelho do dossie no front nao pode divergir do gate do backend. A 33 ESTAVA
+# sugerida nas NFs 350882/431734 — o que travava era o executor, e o motivo so
+# aparecia depois de abrir o modal. 162 cards abertos de 10 operadores no mesmo
+# estado. O gate real NAO muda; isto e rotulo.
+INV150_MOD=$([ -f apps/cockpit-web/src/lib/dossie33Faltando.ts ] && echo 1 || echo 0)
+INV150_UI=$(grep -c 'AvisoDossie33Banner' apps/cockpit-web/src/components/cards/ProposedActions.tsx 2>/dev/null | tr -d ' ')
+# o rotulo do "sem e-mail" nao pode voltar a ter 54 LITERAL (dizia 54 numa linha de 59)
+INV150_LITERAL=$(grep -c 'Lança só a oc 54 no SSW' apps/cockpit-web/src/components/cards/ProposedActions.tsx 2>/dev/null | tr -d ' ')
+INV150_DINAMICO=$(grep -c 'Lança só a oc {codigo} no SSW' apps/cockpit-web/src/components/cards/ProposedActions.tsx 2>/dev/null | tr -d ' ')
+# paridade: os 3 rotulos seguem iguais nos dois lados
+INV150_PARIDADE=$(grep -c 'romaneio de coleta assinado' supabase/functions/_shared/extravio-parcial-dossie.ts apps/cockpit-web/src/lib/dossie33Faltando.ts 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
+INV150_TEST=$( (cd apps/cockpit-web && npx vitest run src/lib/dossie33Faltando.test.ts >/dev/null 2>&1) && echo PASS || echo FAIL)
+if [ "${INV150_MOD:-0}" -eq 1 ] && [ "${INV150_UI:-0}" -ge 2 ] && [ "${INV150_LITERAL:-1}" -eq 0 ] && [ "${INV150_DINAMICO:-0}" -ge 1 ] && [ "${INV150_PARIDADE:-0}" -ge 2 ] && [ "$INV150_TEST" = "PASS" ]; then
+  echo "INV-150: PASS (modulo=$INV150_MOD ui=$INV150_UI literal54=$INV150_LITERAL dinamico=$INV150_DINAMICO paridade=$INV150_PARIDADE test=$INV150_TEST)"
+else
+  echo "INV-150: FAIL (modulo=$INV150_MOD ui=$INV150_UI literal54=$INV150_LITERAL dinamico=$INV150_DINAMICO paridade=$INV150_PARIDADE test=$INV150_TEST — literal54>0 significa que a frase voltou a informar a ocorrencia errada; paridade<2 significa que o espelho do dossie divergiu do backend)"
 fi
 
 echo "=== Fim Fase 8 ==="

@@ -41,10 +41,18 @@ INV_POR_ARQUIVO = {
     # `ativo` (visibilidade) e `autonomo_ativo` (autonomia) são interruptores
     # separados — um nunca substitui o outro.
     "apps/cockpit-web/src/lib/pdfConversaoGuard.ts": ["INV-147"],
-    "apps/cockpit-web/src/components/cards/ProposedActions.tsx": ["INV-147"],
+    "apps/cockpit-web/src/components/cards/ProposedActions.tsx": ["INV-147", "INV-150"],
     "supabase/functions/_shared/pdf-conversao-guard.ts": ["INV-147"],
     "supabase/functions/agente-oc13-autonomo/index.ts": ["INV-148"],
     "supabase/functions/_shared/bastao-client.ts": ["INV-148"],
+
+    # Correção 09.09 (ADR 0027). INV-149: o 59 sobrevive por PENDÊNCIA DE
+    # DOCUMENTO, não por "é extravio total?" — e a assimetria preservar(largo)
+    # × ressuscitar(estreito) é deliberada. INV-150: a 33 bloqueada diz o que
+    # falta, e o espelho do dossiê no front não pode divergir do backend.
+    "supabase/functions/_shared/propostas-pos-resposta-cliente.ts": ["INV-149"],
+    "apps/cockpit-web/src/lib/dossie33Faltando.ts": ["INV-150"],
+    "supabase/functions/_shared/extravio-parcial-dossie.ts": ["INV-150"],
 }
 
 # Resumo curto de cada invariante (1 linha) pra exibir no hook sem precisar
