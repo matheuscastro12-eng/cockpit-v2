@@ -20,6 +20,7 @@ import {
   primeiroAnexoSuportadoSsw,
 } from "@/lib/anexos-ssw-elegiveis";
 import { anexosCobremRomaneio, romaneioExigidoDoCard } from "@/lib/romaneio-cobertura";
+import { faltandoParaOc33, textoFaltandoOc33 } from "@/lib/dossie33Faltando";
 import { extrasSemEmailDeliberado } from "@/lib/extras-sem-email";
 import { relativeTime } from "@/lib/format";
 import {
@@ -1426,6 +1427,27 @@ function ValidacaoHumanaList({
             </span>
           ) : null;
 
+          // Karol 2026-09-09 (NFs 350882/431734): a 33 APARECE e o operador clica
+          // achando que está pronta — mas o executor barra quando o dossiê de
+          // extravio parcial está incompleto, e o motivo só aparecia DEPOIS de
+          // abrir o modal. Aqui a própria linha diz o que falta.
+          // Não é gate: é rótulo. O bloqueio real segue no executor (deliberado —
+          // sem romaneio o SSW reverte a 33). `null` = sem dossiê ⇒ não afirma nada.
+          const ehQualquerOc33 =
+            isCombo || ehOc33Solo || ehEmailOc33 || ehRomaneioInterno || codigo === 33;
+          const faltaDossie33 = ehQualquerOc33 && !isCombo4459
+            ? faltandoParaOc33(card, { ehCombo: isCombo })
+            : null;
+          const textoFalta33 = textoFaltandoOc33(faltaDossie33);
+          const AvisoDossie33Banner = textoFalta33 ? (
+            <div className="ml-12 mt-1 flex items-start gap-1.5 border border-rose-400 bg-rose-50 px-2 py-1 font-mono text-[10px] leading-snug text-rose-900">
+              <span className="shrink-0">📋</span>
+              <span>
+                {textoFalta33} — o SSW reverte a 33 sem isso. Cobre o cliente ou anexe ao dossiê antes de lançar.
+              </span>
+            </div>
+          ) : null;
+
           // Banner ⚠️ pra alertar quando a opção lança oc 33 SEM rodar o fluxo
           // de romaneio interno (carimbado pelo backend só em cards de cliente
           // romaneio-interno, ex. PRATI).
@@ -1581,6 +1603,7 @@ function ValidacaoHumanaList({
                   )}
                 </button>
                 {AvisoRomaneioBanner}
+                {AvisoDossie33Banner}
               </div>
             );
           }
@@ -1615,6 +1638,7 @@ function ValidacaoHumanaList({
                   )}
                 </button>
                 {AvisoRomaneioBanner}
+                {AvisoDossie33Banner}
               </div>
             );
           }
@@ -1646,6 +1670,7 @@ function ValidacaoHumanaList({
                   )}
                 </button>
                 {AvisoRomaneioBanner}
+                {AvisoDossie33Banner}
               </div>
             );
           }
@@ -1692,8 +1717,13 @@ function ValidacaoHumanaList({
                           🚫 sem e-mail — cliente NÃO será notificado
                         </span>
                       </span>
+                      {/* Karol 2026-09-09: o "54" era LITERAL aqui enquanto o título
+                          logo acima já usava {codigo}. Numa linha de 59 a tela dizia
+                          "59" no rótulo e "lança só a oc 54" na explicação — informava
+                          ao operador uma ocorrência que não era a que ia ser lançada.
+                          Visto na NF 350882 (linha 59 com texto de 54). */}
                       <span className="mt-0.5 block font-mono text-[10px] leading-snug text-ink/55">
-                        Lança só a oc 54 no SSW (não envia e-mail). Use quando o cliente já foi avisado por outro canal.
+                        Lança só a oc {codigo} no SSW (não envia e-mail). Use quando o cliente já foi avisado por outro canal.
                       </span>
                     </span>
                     <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-ink/60">
@@ -1702,6 +1732,7 @@ function ValidacaoHumanaList({
                   </div>
                 </button>
                 {AvisoRomaneioBanner}
+                {AvisoDossie33Banner}
               </div>
             );
           }
@@ -1794,6 +1825,7 @@ function ValidacaoHumanaList({
               </button>
 
               {AvisoRomaneioBanner}
+                {AvisoDossie33Banner}
 
 
               {isExpandido && (

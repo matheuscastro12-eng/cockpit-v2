@@ -950,6 +950,64 @@ python3 scripts/dbq.py -tA -c "select nome_cliente, cnpj_pagador, ativo, autonom
 
 **O que NÃO fazer:** pôr a oc 13 como Relacionamento no dicionário. Mediria ~120 cards caindo de uma vez em todas as carteiras (contagem do Bastão em 08/09).
 
+## INV-149 — O 59 sobrevive por PENDÊNCIA DE DOCUMENTO, não por "é extravio total?"
+
+**Regra (Carlos 2026-09-09, ADR 0027):** no menu pós-resposta do trilho tratativa (âncora≠59), um to-do de oc 59 **pendente/aprovado** cujo template é um dos três `..._PEDIR_ROMANEIO` (`TEMPLATES_59_PEDIDO_DOCUMENTO`) NUNCA é cancelado como "obsoleto". O critério é **pendência de documento em aberto** — não a natureza do extravio.
+
+**A ASSIMETRIA É A REGRA, não um detalhe:**
+
+| Caminho | Sinal | Alcance |
+|---|---|---|
+| **Preservar** 59 pendente (whitelist `ehDaListaNova`) | `temPendenciaDocumento59` — 3 templates, só `pendente`/`aprovado` | largo |
+| **Ressuscitar** 59 cancelado (bloco 3b) | `ehExtravioTotalPorTodos59` — só `EXTRAVIO_TOTAL_PEDIR_ROMANEIO` | estreito, inalterado |
+
+**Por que a revivência NÃO foi alargada:** mexeria em **3307 cards abertos** de uma vez, e um 59 revivido pode ser auto-aprovado pela janela de veto — medido em 09/09: **75** to-dos de 59 com `auto_approval_rule = veto_janela:agente-sugere-ocs-padrao:lancar_oc_e_enviar_email:59`. Isso é e-mail ao cliente **sem clique do operador**. Preservar um pendente que o próprio sistema acabou de propor não tem esse risco.
+
+**Caso âncora — NF 75249 / CTRC APO563879-8 (LEONE COMERCIO, Karol):** oc 19 (entrega com falta de volumes = **parcial**). `REGRAS_AUTO_ACAO[19]` propôs `[33, 59, 55, 56]` em 03/09 **22:01:31**; o cliente respondeu e o menu pós-resposta **cancelou o 59 às 22:07:07**, pondo "re-lançar 54" no lugar. Os 59 do card carregam `ENTREGUE_COM_FALTA_PEDIR_ROMANEIO` e `EXTRAVIO_PARCIAL_DEVOLVER_PEDIR_ROMANEIO` — **zero** com o template de total, então o portão antigo (`ehExtravioTotalPorTodos59`) era falso.
+
+**Templates DE FORA de propósito** (são notificação, não pedido de documento): `EXTRAVIO_PARCIAL` (456), `RECUSA_TOTAL` (22), `RECUSA_PARCIAL` (13), `TENTATIVAS_ESGOTADAS` (2) e os 7159 sem template (gêmeos sem e-mail). Incluí-los ofereceria 59 em card sem pendência documental.
+
+**Contra-regra:** o inverso também é bug. Se alguém trocar a whitelist de volta pro sinal estreito, o 59 de card parcial volta a ser cancelado — o guard tem um teste de **fonte** que falha nesse caso.
+
+**Arquivos:** `supabase/functions/_shared/propostas-pos-resposta-cliente.ts`.
+
+**Como verificar:**
+```bash
+deno test --no-check --allow-all supabase/functions/_shared/oc59-extravio-total.test.ts
+```
+
+**O que NÃO fazer:** colapsar `todos59Total` e `todos59PedidoDoc` numa variável só. A query traz os três templates; a partição por template é o que mantém a revivência estreita.
+
+---
+
+## INV-150 — A 33 bloqueada DIZ o que falta, e o espelho do dossiê não pode divergir
+
+**Regra (Carlos 2026-09-09, ADR 0027):** quando o dossiê de extravio parcial está incompleto, a linha da oc 33 no card mostra **o que falta** (`falta romaneio de coleta assinado`, `falta descrição dos itens + valor dos itens`). O gate real **não muda** — segue no executor, e segue bloqueando. Isto é rótulo, não portão.
+
+**Por quê:** o relato chegou como "o sistema não sugere a oc 33". A 33 **estava** sugerida — os to-dos existiam em `pendente` e apareciam na tela. O que travava era a execução, e o motivo só aparecia **depois** de abrir o modal: a linha mostrava "LANÇAR →" como se estivesse pronta. Medido nos dois cards do relato:
+
+| NF | romaneio | descrição | valor |
+|---|---|---|---|
+| 350882 | **false** | true | true |
+| 431734 | true | **false** | **false** |
+
+Mesmo portão, peça faltante diferente. E **162 cards abertos de 10 operadores** estavam no mesmo estado (DUILIO 37, FELIPE 34, KAROLINE 17, MARIA 17, VICTOR 16, INGRID 13, JULIA 12, LARISSA 9, ISABELY 6, CAMILA 1) — não era da Karol.
+
+**O bloqueio é DELIBERADO e não se toca** (ADR 0023, incidente NF 158084): sem romaneio o SSW **reverte** a 33 em loop.
+
+**ESPELHO obrigatório:** `apps/cockpit-web/src/lib/dossie33Faltando.ts` espelha `supabase/functions/_shared/extravio-parcial-dossie.ts` (`ROTULO_EVIDENCIA`, `avaliarDossie`, `decidirGateOc33`, `classificarOc33`) — mesma disciplina do `romaneio-cobertura.ts`. O teste do front **lê o fonte do backend** e falha se os rótulos ou as três checagens `presente` mudarem lá sem mudar aqui. Sem isso o espelho vira detector descalibrado e a tela passa a mentir sobre o que falta.
+
+**Fallback conservador:** sem `caso === "2"` comprovado, toda 33 é tratada como **completude** (exige as 3) — igual ao backend. `null` (card sem dossiê) significa "não sei" e a UI **não afirma nada**; nunca vira "está liberado".
+
+**Arquivos:** `apps/cockpit-web/src/lib/dossie33Faltando.ts`, `apps/cockpit-web/src/components/cards/ProposedActions.tsx`, espelhando `supabase/functions/_shared/extravio-parcial-dossie.ts`.
+
+**Como verificar:**
+```bash
+cd apps/cockpit-web && npx vitest run src/lib/dossie33Faltando.test.ts
+```
+
+**O que NÃO fazer:** transformar o rótulo em gate no front (desabilitar o botão). O operador pode ter motivo pra forçar (`extras.forcar_oc33_dossie_incompleto`), e duplicar o portão no front cria dois lugares pra divergir.
+
 ---
 
 ## Histórico
@@ -975,3 +1033,4 @@ python3 scripts/dbq.py -tA -c "select nome_cliente, cnpj_pagador, ativo, autonom
 - 2026-09-03 — INV-141/142/143 adicionados junto com o ADR 0025 (oc 55 automática pra clientes com autorização permanente de seguir parcial: 4 CNPJs, 1 do DUILIO e 3 do FELIPE). NÃO nasceram de bug em produção — nasceram de uma medição feita ANTES de codar. A regra do briefing ("se a mensagem não disser 'extravio total', é parcial") foi confrontada com 180 dias de instruções reais desses clientes e classificaria errado 4 de 23 cards de oc 06 (17%): a unidade escreve SÓ O NÚMERO de volumes faltantes, sem a palavra TOTAL, e quando esse número é igual ao total de volumes da NF o extravio é total. Âncora NF 29642 (instrução `9`, NF de 9 volumes) receberia uma 55 mandando a operação entregar carga que não existe mais. Daí o INV-141 (a inversão vive só dentro da whitelist; sinal de total = palavra OU qtd>=volumes). A investigação achou de quebra: (a) `OCS_NOTIFICOU_APOS_EXTRAVIO` sem a 55, que faria o card de volta (19/10/35) exibir banner falso "cliente não notificado" — INV-143, que fecha uma divergência pré-existente com `houve55AposExtravio`; (b) `extravio-enrichment` arrastando `bastao-rules`, que faz query em TOP-LEVEL AWAIT, impedindo teste puro — parser extraído pra `extravio-qtd-volumes.ts` (que desde o ADR 0012 nunca tivera teste, apesar de decidir total×parcial); (c) uma TERCEIRA cópia do mesmo parser em `agente-sugere-ocs-padrao` (dívida registrada). INV-142 trava o estado inicial: flag OFF, sombra ON, seed inativo, loader fail-closed — porque ocorrência no SSW não tem desfazer. REGRA INVIOLÁVEL: extravio total nunca vira 55, e cliente fora da whitelist nunca muda de comportamento.
 - 2026-07-26 — INV-055 adicionado pós-incidente de custo (domingo sem operação: $39,34 vs $8/dia, 4x). Causa raiz ÚNICA em cadeia, provada no `anthropic_usage_log` + `card_events`: `maxTokens: 700` no interpretador era MENOR que a resposta legítima do próprio schema (3 `trecho_verbatim` de evidência + motivo + motivo_combo) → 289 respostas bateram exatamente em 700 = cortadas no meio → JSON inválido → `completeJson` repetia com o MESMO teto (retry condenado, cortava igual) → 268 `InterpretadorRespostaClienteFalhou` (0 em todos os dias anteriores) → o card não recebia `ia_sugestao_oc_resposta` → `cron-ia-resposta-pendentes` seleciona exatamente "respondeu mas sem sugestão" e o devolvia a cada 5 min, sem limite de tentativas → 899 chamadas Anthropic sobre 11 mensagens (82 por mensagem; NF 164346 sozinha: 326 chamadas, 137 falhas, das 07:03 às 17:11). Amplificador: a onda 3 de 25/07 passou o `scan-email-pre-card` a drenar a fila em loop de 45s (backlog de 94k), realimentando as mesmas mensagens. Fix em 4 camadas: (1) teto 1800 + limites de tamanho explícitos no prompt; (2) retry que DOBRA o teto quando `stop_reason=max_tokens` (remove a causa em vez de repeti-la); (3) `repararJsonTruncado` salva o maior prefixo válido — os campos de decisão vêm primeiro no schema — entrando com confiança ≤0,5 e pendência visível; (4) breaker `MAX_FALHAS_LLM` por (card, mensagem): esgotado, aplica sugestão DETERMINÍSTICA conservadora (mantém 54/59 do trilho, zero ação automática em SSW) pela MESMA estrutura do fluxo normal, então o card segue com banner, propostas e to-dos, marcado `leitura_degradada`. REGRA INVIOLÁVEL: card com resposta de cliente nunca fica sem interpretação e sem ações — e falha de leitura nunca vira loop infinito de custo. Regra do Caio (verbatim): "Não podemos deixar o card sem interpretar, sem ações, e sem nada. (…) Não adianta só jogar para o operador fazer."
 - 2026-09-08 — **INV-147 e INV-148 adicionados junto com o ADR 0026** (correção 08.09, dois bugs da operadora LARISSA). Nenhum dos dois foi diagnosticado por leitura de código: os dois foram MEDIDOS. (a) O bloqueio do PDF no 33+44 não era falha de conversão — renderizei as páginas com PDFium e OLHEI: as páginas reprovadas a 1,37% e 1,23% estavam legíveis (documento de transporte com placa manuscrita; ficha de agendamento). O piso de 2% de tinta estava reprovando conversão boa, e uma página reprovada derrubava o PDF inteiro — a página 1, a 6,41%, ia pro lixo junto. De quebra descobriu-se que a telemetria `ConversaoPdfBloqueadaGuard` do front NUNCA gravou: o `actor_id` era a string `"front-conversao-pdf"` e a RLS `card_events_insert_operator` exige `actor_id = current_operador_id()`, então todo insert era recusado e engolido pelo `catch`. Os 2 únicos eventos do banco vinham do servidor. A ADR 0014 mandava contar bloqueios por 2–4 semanas pra decidir o conversor server-side, e o contador estava cego desde o começo — por isso o bug chegou por reclamação de operadora, não por métrica. (b) A NF 1037746 não entrou nas pendências porque a oc 13 está fora do escopo e o pagador não estava na exceção: o sistema seguiu a regra, a regra é que estava errada pro cliente. Ao preparar o fix apareceu a armadilha que virou o INV-148: a tabela da exceção era um interruptor só pra "aparecer" e pra "robô agir", então corrigir a visibilidade ligaria um agente que lança oc 21 e cancela reentrega sem autorização do cliente — o oposto da regra do negócio. REGRA INVIOLÁVEL: sinal fraco de qualidade (pouca tinta) pede olho humano, nunca reprova sozinho; e visibilidade nunca liga autonomia.
+- 2026-09-09 — **INV-149 e INV-150 adicionados junto com o ADR 0027** (correção 09.09, dois casos da operadora KAROL). A hipótese do relato — "a existência de uma 33 anterior bloqueou a nova sugestão" — foi MEDIDA e **descartada**: a dedup usa `STATUS_ATIVOS = {pendente, aprovado}` e nunca consulta o histórico do SSW; `executando`/`cancelado` não ocupam o código (liberado de propósito desde a NF 2148226); o índice único de to-dos cobre só pendente/aprovado; e a idempotência do SSW é `(card_id, codigo_oc, ctrc, **todo_id**)`, então to-do novo não bate nela. Mais: **a 33 estava sendo sugerida nos dois cards** — aparece nas telas do relato e o banco confirma (350882 com 2 to-dos de 33 `pendente` desde 19/08; 431734 com 9 `pendente` desde 03/09). Eram dois bugs de causas independentes, e nenhuma era a do relato. (a) O 59 da NF 75249 nasceu correto pela regra da oc 19 e foi **cancelado 6 minutos depois** pelo menu pós-resposta, porque o portão só perdoava extravio TOTAL — num card parcial (template `ENTREGUE_COM_FALTA_PEDIR_ROMANEIO`) o sinal era falso e o 59 virava "obsoleto". (b) A 33 aparecia mas o executor a barrava por dossiê incompleto, com o motivo escondido atrás do modal. Erro de medição corrigido no caminho, que vale registrar: a primeira sonda buscou o template em `args.template_email` e devolveu 0 pra tudo — o campo real é `args.template_id`, o mesmo que o código consulta; o "0" era artefato da sonda, não evidência. REGRA INVIOLÁVEL: ocorrência que existe por pendência de documento sobrevive enquanto a pendência existir; e ação bloqueada sempre diz por quê na própria linha, sem obrigar o operador a abrir o modal pra descobrir.
