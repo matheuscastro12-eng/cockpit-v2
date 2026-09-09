@@ -727,6 +727,10 @@ SELECT count(*) FROM cards WHERE agente_extravio_status='nao_rodou' AND coalesce
 
 **Guard:** INV-062 no verify-cockpit + `oc59-extravio-total.test.ts` (helpers puros `ehExtravioTotalPorTodos59` / `escolher59IndenizacaoParaReviver`). **Cenário real:** 2026-08-05, NF 1102187 UNIAO QUIMICA (LARISSA) — banner IA recomendava "oc 59 + email" (extravio total) mas o menu (âncora 49) não oferecia 59 lançável; os 59 do override foram cancelados pela escalada + "obsoleta após resposta". Relacionado a [[INV-060]] (mesmo arquivo, mesma família da separação 54/59).
 
+**ATUALIZADO 2026-09-09 (ADR 0027, INV-149).** A garantia deste INV continua valendo, mas quem a entrega mudou: o portão da whitelist deixou de ser "é extravio total?" e passou a ser **"tem pendência de documento em aberto?"** (`temPendenciaDocumento59`, os três templates `..._PEDIR_ROMANEIO`). O total é **subconjunto** disso, então o 59 de extravio total segue sobrevivendo ao menu — agora junto com o 59 de card PARCIAL, que era o bug do Caso 1 (NF 75249). A **revivência** (bloco 3b) segue gated por `ehExtravioTotalPorTodos59`, estreita e inalterada.
+
+Duas mudanças no comando de verificação, ambas necessárias: (a) `--allow-read` na chamada do `deno test`, porque a suíte ganhou o guard de FONTE do INV-149 e sem a permissão o deno aborta com `NotCapable` — o INV-062 acusaria "menu regrediu" por motivo falso (mesma armadilha registrada nos comentários do INV-126 e do INV-133); (b) o grep saiu do NOME do sinal para a ESTRUTURA da whitelist (`&& cod === 59 && !ehCombo4459`), senão cobrar o nome antigo daria FAIL numa mudança que **amplia** a proteção. Quem crava qual sinal gateia o quê é o [[INV-149]].
+
 ---
 
 ## INV-063 — TODO acesso SSW (leitura E lançamento) pela conta de serviço; idempotent_skip só com verdade do SSW

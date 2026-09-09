@@ -1686,8 +1686,19 @@ fi
 # como obsoleto. Gate ehExtravioTotal (presença durável do todo 59+template) →
 # INERTE pra card não-total. Checks: (a) testes puros verdes; (b) whitelist mantém
 # 59 em total; (c) helper de revive presente (def + call).
-INV62_TEST=$(deno test --no-check supabase/functions/_shared/oc59-extravio-total.test.ts >/dev/null 2>&1 && echo ok || echo fail)
-INV62_WL=$(grep -c 'ehExtravioTotal && cod === 59' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
+# ATUALIZADO 2026-09-09 (ADR 0027) — dois ajustes, os dois necessarios:
+#  (1) --allow-read: a suite ganhou o guard de FONTE do INV-149, que LE o
+#      propostas-pos-resposta-cliente.ts. Sem a permissao o deno aborta com
+#      NotCapable e o INV-062 acusaria "menu regrediu" por motivo FALSO — a
+#      mesma armadilha que os comentarios do INV-126 e do INV-133 ja registram.
+#  (2) o grep saiu do NOME do sinal pra ESTRUTURA da whitelist. O portao deixou
+#      de ser "e extravio total?" e passou a ser "tem pendencia de documento?"
+#      (`pendenciaDoc59`), e o total e SUBCONJUNTO disso — logo a garantia deste
+#      INV (o 59 de total sobrevive ao menu) continua valendo. Cobrar o nome
+#      antigo daria FAIL numa mudanca que AMPLIA a protecao. Quem crava QUAL
+#      sinal gateia o que e o INV-149; aqui basta que o 59 siga na whitelist.
+INV62_TEST=$(deno test --no-check --allow-read supabase/functions/_shared/oc59-extravio-total.test.ts >/dev/null 2>&1 && echo ok || echo fail)
+INV62_WL=$(grep -cE '&& cod === 59 && !ehCombo4459' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
 INV62_REVIVE=$(grep -c 'escolher59IndenizacaoParaReviver' supabase/functions/_shared/propostas-pos-resposta-cliente.ts 2>/dev/null | tr -d ' ')
 if [ "$INV62_TEST" = "ok" ] && [ "${INV62_WL:-0}" -ge 1 ] && [ "${INV62_REVIVE:-0}" -ge 2 ]; then
   echo "INV-062: PASS (test=$INV62_TEST whitelist59=$INV62_WL revive=$INV62_REVIVE)"
